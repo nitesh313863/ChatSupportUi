@@ -21,8 +21,6 @@ const PrivateChatPage = () => {
     const typingDebounceRef = useRef(null);
     const shouldReconnectRef = useRef(false);
     const manualCloseRef = useRef(false);
-    const messagesRef = useRef([]);
-    const presenceOnlineRef = useRef(false);
 
     const [presence, setPresence] = useState({
         online: false,
@@ -31,19 +29,28 @@ const PrivateChatPage = () => {
 
     const location = useLocation();
     const roomName = location.state?.roomName || 'Private Chat';
+    const [otherUserId, setOtherUserId] = useState(location.state?.otherUserId ?? null);
 
     const wsRef = useRef(null);
     const bottomRef = useRef(null);
+    const otherUserIdRef = useRef(location.state?.otherUserId ?? null);
 
     const token = localStorage.getItem('token');
     const user = JSON.parse(localStorage.getItem('user'));
 
-    const canMarkMessagesAsRead = useCallback(() => {
-        return document.visibilityState === 'visible' && document.hasFocus();
+    const isChatActive = useCallback(() => {
+        return document.visibilityState === 'visible';
     }, []);
 
     /* ================= NAVIGATE BACK ================= */
     const handleBack = () => {
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+                type: 'ROOM_CLOSE',
+                roomId: Number(roomId),
+                userId: user.id
+            }));
+        }
         navigate(-1);
     };
 
@@ -59,11 +66,15 @@ const PrivateChatPage = () => {
                 senderId: m.senderId,
                 content: m.content,
                 sentAt: new Date(m.createdAt).getTime(),
-                delivered: m.senderId === user.id
-                    ? (m.deliveryStatus === 'DELIVERED' || m.deliveryStatus === 'READ')
-                    : true,
+                delivered: m.deliveryStatus === 'DELIVERED' || m.deliveryStatus === 'READ',
                 read: m.deliveryStatus === 'READ'
             }));
+
+            const inferredOtherUserId = mapped.find(m => m.senderId !== user.id)?.senderId;
+            if (inferredOtherUserId && inferredOtherUserId !== otherUserIdRef.current) {
+                otherUserIdRef.current = inferredOtherUserId;
+                setOtherUserId(inferredOtherUserId);
+            }
 
             setMessages(mapped);
 
@@ -72,7 +83,7 @@ const PrivateChatPage = () => {
                 m => m.senderId !== user.id && !m.read
             );
 
-            if (hasUnread && canMarkMessagesAsRead()) {
+            if (hasUnread && isChatActive()) {
                 await api.post(`/chat/rooms/${roomId}/read`);
             }
 
@@ -81,7 +92,7 @@ const PrivateChatPage = () => {
         } finally {
             setLoading(false);
         }
-    }, [roomId, user.id, canMarkMessagesAsRead]);
+    }, [roomId, user.id, isChatActive]);
 
     /* ================= TYPING HANDLER ================= */
     const handleTyping = useCallback(() => {
@@ -130,12 +141,16 @@ const PrivateChatPage = () => {
             `ws://localhost:8086/ws/chat?token=${token}`
         );
 
-        // Send periodic pings to keep connection alive
         const pingInterval = setInterval(() => {
             if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({type: 'PING'}));
+                ws.send(JSON.stringify({ type: 'PING' }));
+                ws.send(JSON.stringify({
+                    type: 'ROOM_OPEN',
+                    roomId: Number(roomId),
+                    userId: user.id
+                }));
             }
-        }, 25000); // Send ping every 25 seconds
+        }, 25000);
 
         ws.onopen = () => {
             console.log('[WS] Connected successfully');
@@ -144,11 +159,22 @@ const PrivateChatPage = () => {
 
             // Send initial presence
             setTimeout(() => {
-                if (ws.readyState === WebSocket.OPEN && shouldReconnectRef.current) {
+                if (ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({
                         type: 'USER_ONLINE',
                         userId: user.id
                     }));
+                    ws.send(JSON.stringify({
+                        type: 'ROOM_OPEN',
+                        roomId: Number(roomId),
+                        userId: user.id
+                    }));
+
+                    if (isChatActive()) {
+                        setTimeout(() => {
+                            api.post(`/chat/rooms/${roomId}/read`).catch(() => {});
+                        }, 200);
+                    }
                 }
             }, 100);
         };
@@ -170,7 +196,6 @@ const PrivateChatPage = () => {
                     return;
                 }
 
-                // DELIVERED EVENT (double gray ticks for sender)
                 if (data.type === 'DELIVERED') {
                     setMessages(prev =>
                         prev.map(m =>
@@ -184,8 +209,14 @@ const PrivateChatPage = () => {
 
                 // USER ONLINE
                 if (data.type === 'USER_ONLINE') {
-                    if (data.userId !== user.id) {
-                        presenceOnlineRef.current = true;
+                    const shouldApplyPresence = otherUserIdRef.current != null
+                        ? data.userId === otherUserIdRef.current
+                        : data.roomId === Number(roomId);
+                    if (shouldApplyPresence) {
+                        if (otherUserIdRef.current == null && data.userId !== user.id) {
+                            otherUserIdRef.current = data.userId;
+                            setOtherUserId(data.userId);
+                        }
                         setPresence({
                             online: true,
                             lastSeen: null
@@ -196,8 +227,14 @@ const PrivateChatPage = () => {
 
                 // USER OFFLINE
                 if (data.type === 'USER_OFFLINE') {
-                    if (data.userId !== user.id) {
-                        presenceOnlineRef.current = false;
+                    const shouldApplyPresence = otherUserIdRef.current != null
+                        ? data.userId === otherUserIdRef.current
+                        : data.roomId === Number(roomId);
+                    if (shouldApplyPresence) {
+                        if (otherUserIdRef.current == null && data.userId !== user.id) {
+                            otherUserIdRef.current = data.userId;
+                            setOtherUserId(data.userId);
+                        }
                         setPresence({
                             online: false,
                             lastSeen: data.lastSeen
@@ -232,15 +269,19 @@ const PrivateChatPage = () => {
 
                 // MESSAGE EVENT
                 if (data.type === 'MESSAGE' && data.roomId === Number(roomId)) {
+                    const inferredOtherUserId = data.senderId === user.id ? data.receiverId : data.senderId;
+                    if (inferredOtherUserId && inferredOtherUserId !== otherUserIdRef.current) {
+                        otherUserIdRef.current = inferredOtherUserId;
+                        setOtherUserId(inferredOtherUserId);
+                    }
+
                     const deliveryStatus = data.deliveryStatus || data.status;
-                    const isMessageFromCurrentUser = data.senderId === user.id;
                     const isRead = typeof data.read === 'boolean'
                         ? data.read
                         : deliveryStatus === 'READ';
-                    const isDeliveredByStatus = deliveryStatus === 'DELIVERED' || deliveryStatus === 'READ';
-                    const receiverOnline = typeof data.receiverOnline === 'boolean'
-                        ? data.receiverOnline
-                        : presenceOnlineRef.current;
+                    const isDelivered = typeof data.delivered === 'boolean'
+                        ? data.delivered
+                        : deliveryStatus === 'DELIVERED' || deliveryStatus === 'READ';
                     const newMessage = {
                         messageId: data.messageId,
                         roomId: data.roomId,
@@ -248,9 +289,7 @@ const PrivateChatPage = () => {
                         content: data.content,
                         sentAt: data.sentAt || Date.now(),
                         receiverId: data.receiverId,
-                        delivered: isMessageFromCurrentUser
-                            ? (isRead || isDeliveredByStatus || receiverOnline)
-                            : true,
+                        delivered: isDelivered,
                         read: isRead
                     };
 
@@ -258,8 +297,8 @@ const PrivateChatPage = () => {
 
                     setMessages(prev => [...prev, newMessage]);
 
-                    // Mark as read only when chat is actually visible and focused
-                    if (data.receiverId === user.id && canMarkMessagesAsRead()) {
+                    // Mark as read if current user is receiver
+                    if (data.receiverId === user.id && isChatActive()) {
                         api.post(`/chat/rooms/${roomId}/read`)
                             .then(() => {
                                 console.log('[WS] Message marked as read');
@@ -303,7 +342,6 @@ const PrivateChatPage = () => {
                 return;
             }
 
-            console.log('[WS] Disconnected, code:', event.code, 'reason:', event.reason);
             connectionRetryRef.current = setTimeout(() => {
                 if (shouldReconnectRef.current) {
                     console.log('[WS] Attempting to reconnect...');
@@ -313,7 +351,7 @@ const PrivateChatPage = () => {
         };
 
         wsRef.current = ws;
-    }, [token, roomId, user.id, canMarkMessagesAsRead]);
+    }, [token, roomId, user.id, isChatActive]);
 
     /* ================= SEND MESSAGE ================= */
     const sendMessage = async () => {
@@ -364,36 +402,28 @@ const PrivateChatPage = () => {
         }
     };
 
-    const markRoomAsReadIfActive = useCallback(() => {
-        if (!canMarkMessagesAsRead()) {
-            return;
-        }
-
-        const hasUnread = messagesRef.current.some(
-            m => m.senderId !== user.id && !m.read
-        );
-
-        if (!hasUnread) {
-            return;
-        }
-
-        api.post(`/chat/rooms/${roomId}/read`).catch(err => {
-            console.error('[READ] Failed to mark room as read on focus:', err);
-        });
-    }, [roomId, user.id, canMarkMessagesAsRead]);
-
     /* ================= EFFECTS ================= */
     useEffect(() => {
-        presenceOnlineRef.current = presence.online;
-    }, [presence.online]);
+        otherUserIdRef.current = otherUserId;
+    }, [otherUserId]);
 
     useEffect(() => {
-        messagesRef.current = messages;
-    }, [messages]);
+        const handleVisible = () => {
+            if (document.visibilityState === 'visible') {
+                api.post(`/chat/rooms/${roomId}/read`).catch(() => {});
+            }
+        };
+
+        document.addEventListener('visibilitychange', handleVisible);
+        return () => {
+            document.removeEventListener('visibilitychange', handleVisible);
+        };
+    }, [roomId]);
 
     useEffect(() => {
         shouldReconnectRef.current = true;
         manualCloseRef.current = false;
+
         loadMessages();
         connectWebSocket();
 
@@ -402,6 +432,13 @@ const PrivateChatPage = () => {
 
             // Clean up WebSocket
             if (wsRef.current) {
+                if (wsRef.current.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(JSON.stringify({
+                        type: 'ROOM_CLOSE',
+                        roomId: Number(roomId),
+                        userId: user.id
+                    }));
+                }
                 manualCloseRef.current = true;
                 wsRef.current.close();
                 wsRef.current = null;
@@ -422,21 +459,7 @@ const PrivateChatPage = () => {
             setIsTyping(false);
             setTypingUserId(null);
         };
-    }, [loadMessages, connectWebSocket]);
-
-    useEffect(() => {
-        const handleAttentionChange = () => {
-            markRoomAsReadIfActive();
-        };
-
-        window.addEventListener('focus', handleAttentionChange);
-        document.addEventListener('visibilitychange', handleAttentionChange);
-
-        return () => {
-            window.removeEventListener('focus', handleAttentionChange);
-            document.removeEventListener('visibilitychange', handleAttentionChange);
-        };
-    }, [markRoomAsReadIfActive]);
+    }, [roomId, user.id, loadMessages, connectWebSocket]);
 
     useEffect(() => {
         bottomRef.current?.scrollIntoView({behavior: 'smooth'});
@@ -551,8 +574,8 @@ const PrivateChatPage = () => {
                                 }`}>
                                     <p className="break-words">{msg.content}</p>
 
-                                    <div className="flex items-center justify-end gap-1 text-[10px] mt-1">
-                                        <span className="opacity-70">
+                                    <div className="flex items-center justify-end gap-1 text-[10px] opacity-80 mt-1">
+                                        <span>
                                             {messageTime.toLocaleTimeString([], {
                                                 hour: '2-digit',
                                                 minute: '2-digit'
@@ -560,14 +583,10 @@ const PrivateChatPage = () => {
                                         </span>
 
                                         {isMine && (
-                                            <span className={`ml-1 text-xs ${
-                                                msg.read
-                                                    ? 'font-extrabold text-sky-300 bg-sky-500/30 px-1.5 py-0.5 rounded-full shadow-sm'
-                                                    : msg.delivered
-                                                        ? 'font-bold text-gray-300'
-                                                        : 'font-bold text-gray-400'
+                                            <span className={`ml-1 font-bold ${
+                                                msg.read ? 'text-blue-300' : msg.delivered ? 'text-gray-300' : 'text-gray-400'
                                             }`}>
-                                                {msg.read ? '\u2713\u2713' : msg.delivered ? '\u2713\u2713' : '\u2713'}
+                                                {msg.read ? '✓✓' : msg.delivered ? '✓✓' : '✓'}
                                             </span>
                                         )}
                                     </div>
@@ -650,6 +669,7 @@ const PrivateChatPage = () => {
 };
 
 export default PrivateChatPage;
+
 
 
 

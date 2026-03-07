@@ -15,10 +15,7 @@ import {
     MessageSquare,
     Eye,
     ShieldAlert,
-    Check,
-    Calendar,
-    MessageCircle,
-    MoreHorizontal
+    Calendar
 } from 'lucide-react';
 import {useNavigate} from "react-router-dom";
 
@@ -145,7 +142,12 @@ const ContactsPage = () => {
 
             const roomId = res.data; // ResponseModel → data
 
-            navigate(`/chat/${roomId}`);
+            navigate(`/chat/${roomId}`, {
+                state: {
+                    roomName: contact.contactName || 'Private Chat',
+                    otherUserId: contact.contactId
+                }
+            });
         } catch (err) {
             toast.error('Unable to open chat');
         }

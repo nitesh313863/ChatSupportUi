@@ -17,7 +17,7 @@ const Layout = () => {
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
     const { user, logout } = useAuth();
     const location = useLocation();
-    const presenceWsRef = useRef(null);
+    const wsRef = useRef(null);
     const reconnectTimeoutRef = useRef(null);
     const shouldReconnectRef = useRef(false);
 
@@ -35,14 +35,14 @@ const Layout = () => {
 
         shouldReconnectRef.current = true;
 
-        const connectPresenceSocket = () => {
+        const connect = () => {
             if (!shouldReconnectRef.current) {
                 return;
             }
 
-            if (presenceWsRef.current) {
-                presenceWsRef.current.close();
-                presenceWsRef.current = null;
+            if (wsRef.current) {
+                wsRef.current.close();
+                wsRef.current = null;
             }
 
             const ws = new WebSocket(`ws://localhost:8086/ws/chat?token=${token}`);
@@ -66,25 +66,26 @@ const Layout = () => {
                     clearInterval(pingInterval);
                     pingInterval = null;
                 }
-                presenceWsRef.current = null;
+
+                wsRef.current = null;
 
                 if (!shouldReconnectRef.current) {
                     return;
                 }
 
                 reconnectTimeoutRef.current = setTimeout(() => {
-                    connectPresenceSocket();
+                    connect();
                 }, 3000);
             };
 
             ws.onerror = () => {
-                // reconnect will be handled in onclose
+                // reconnect handled by onclose
             };
 
-            presenceWsRef.current = ws;
+            wsRef.current = ws;
         };
 
-        connectPresenceSocket();
+        connect();
 
         return () => {
             shouldReconnectRef.current = false;
@@ -94,9 +95,9 @@ const Layout = () => {
                 reconnectTimeoutRef.current = null;
             }
 
-            if (presenceWsRef.current) {
-                presenceWsRef.current.close();
-                presenceWsRef.current = null;
+            if (wsRef.current) {
+                wsRef.current.close();
+                wsRef.current = null;
             }
         };
     }, [user?.id]);

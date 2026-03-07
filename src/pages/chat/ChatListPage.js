@@ -64,7 +64,8 @@ const ChatListPage = () => {
                         onClick={() =>
                             navigate(`/chat/${chat.roomId}`, {
                                 state: {
-                                    roomName: chat.name
+                                    roomName: chat.name,
+                                    otherUserId: chat.otherUserId
                                 }
                             })
                         }
@@ -82,11 +83,18 @@ const ChatListPage = () => {
                                 <p className="font-medium text-gray-900">
                                     {chat.name}
                                 </p>
-                                {chat.lastMessageTime && (
-                                    <p className="text-xs text-gray-400">
-                                        {new Date(chat.lastMessageTime).toLocaleTimeString()}
-                                    </p>
-                                )}
+                                <div className="flex items-center gap-2">
+                                    {chat.unreadCount > 0 && (
+                                        <span className="min-w-[20px] h-5 px-1 rounded-full bg-green-600 text-white text-[11px] font-semibold flex items-center justify-center">
+                                            {chat.unreadCount}
+                                        </span>
+                                    )}
+                                    {chat.lastMessageTime && (
+                                        <p className="text-xs text-gray-400">
+                                            {new Date(chat.lastMessageTime).toLocaleTimeString()}
+                                        </p>
+                                    )}
+                                </div>
                             </div>
                             <p className="text-sm text-gray-500 truncate">
                                 {chat.lastMessage || 'No messages yet'}
