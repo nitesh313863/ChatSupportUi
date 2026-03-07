@@ -1,5 +1,6 @@
 import React, {useEffect, useRef, useState, useCallback} from 'react';
 import api from '../../utils/api';
+import { buildChatWsUrl } from '../../utils/ws';
 import toast from 'react-hot-toast';
 import {Send, ArrowLeft, Loader, User, Wifi, WifiOff} from 'lucide-react';
 import {useParams, useLocation, useNavigate} from 'react-router-dom';
@@ -137,9 +138,7 @@ const PrivateChatPage = () => {
         setConnectionStatus('connecting');
         console.log('[WS] Connecting...');
 
-        const ws = new WebSocket(
-            `ws://localhost:8086/ws/chat?token=${token}`
-        );
+        const ws = new WebSocket(buildChatWsUrl(token));
 
         const pingInterval = setInterval(() => {
             if (ws.readyState === WebSocket.OPEN) {
@@ -160,10 +159,6 @@ const PrivateChatPage = () => {
             // Send initial presence
             setTimeout(() => {
                 if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({
-                        type: 'USER_ONLINE',
-                        userId: user.id
-                    }));
                     ws.send(JSON.stringify({
                         type: 'ROOM_OPEN',
                         roomId: Number(roomId),

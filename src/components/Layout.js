@@ -2,6 +2,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, Outlet } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { buildChatWsUrl } from '../utils/ws';
 import {
     Users,
     UserX,
@@ -45,15 +46,10 @@ const Layout = () => {
                 wsRef.current = null;
             }
 
-            const ws = new WebSocket(`ws://localhost:8086/ws/chat?token=${token}`);
+            const ws = new WebSocket(buildChatWsUrl(token));
             let pingInterval = null;
 
             ws.onopen = () => {
-                ws.send(JSON.stringify({
-                    type: 'USER_ONLINE',
-                    userId: user.id
-                }));
-
                 pingInterval = setInterval(() => {
                     if (ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({ type: 'PING' }));

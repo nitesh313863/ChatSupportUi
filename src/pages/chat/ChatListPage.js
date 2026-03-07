@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../../utils/api';
+import { buildChatWsUrl } from '../../utils/ws';
 import toast from 'react-hot-toast';
 import {
     MessageCircle,
@@ -127,15 +128,10 @@ const ChatListPage = () => {
                 wsRef.current = null;
             }
 
-            const ws = new WebSocket(`ws://localhost:8086/ws/chat?token=${token}`);
+            const ws = new WebSocket(buildChatWsUrl(token));
             let pingInterval = null;
 
             ws.onopen = () => {
-                ws.send(JSON.stringify({
-                    type: 'USER_ONLINE',
-                    userId: user.id
-                }));
-
                 pingInterval = setInterval(() => {
                     if (ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({ type: 'PING' }));
