@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../../utils/api';
 import toast from 'react-hot-toast';
@@ -12,9 +12,14 @@ const ChatListPage = () => {
     const [chats, setChats] = useState([]);
     const [loading, setLoading] = useState(true);
     const navigate = useNavigate();
+    const wsRef = useRef(null);
+    const reconnectTimeoutRef = useRef(null);
+    const shouldReconnectRef = useRef(false);
+    const token = localStorage.getItem('token');
+    const user = JSON.parse(localStorage.getItem('user') || 'null');
 
     /* ================= LOAD CHAT LIST ================= */
-    const loadChats = async () => {
+    const loadChats = useCallback(async () => {
         try {
             setLoading(true);
             const res = await api.get('/chat/rooms/get/all');
@@ -26,11 +31,172 @@ const ChatListPage = () => {
         } finally {
             setLoading(false);
         }
-    };
+    }, []);
 
     useEffect(() => {
         loadChats();
+    }, [loadChats]);
+
+    const handleMessageEvent = useCallback((payload) => {
+        const currentUserId = Number(user?.id);
+        const roomId = Number(payload?.roomId);
+        const senderId = Number(payload?.senderId);
+        const receiverId = Number(payload?.receiverId);
+
+        if (!currentUserId || !roomId || (!senderId && !receiverId)) {
+            return;
+        }
+
+        if (senderId !== currentUserId && receiverId !== currentUserId) {
+            return;
+        }
+
+        const isIncoming = receiverId === currentUserId;
+        const fallbackTime = new Date().toISOString();
+        const parsedTime = payload?.sentAt ? new Date(payload.sentAt) : null;
+        const lastMessageTime = parsedTime && !Number.isNaN(parsedTime.getTime())
+            ? parsedTime.toISOString()
+            : fallbackTime;
+        const lastMessage = payload?.content || '';
+
+        setChats((prev) => {
+            const currentIndex = prev.findIndex((chat) => Number(chat.roomId) === roomId);
+            const otherUserId = senderId === currentUserId ? receiverId : senderId;
+
+            if (currentIndex === -1) {
+                const newChat = {
+                    roomId,
+                    name: otherUserId ? `User ${otherUserId}` : 'Private Chat',
+                    otherUserId: otherUserId || null,
+                    lastMessage,
+                    lastMessageTime,
+                    unreadCount: isIncoming ? 1 : 0
+                };
+                return [newChat, ...prev];
+            }
+
+            const currentChat = prev[currentIndex];
+            const updatedChat = {
+                ...currentChat,
+                otherUserId: currentChat.otherUserId ?? (otherUserId || null),
+                lastMessage: lastMessage || currentChat.lastMessage,
+                lastMessageTime,
+                unreadCount: isIncoming
+                    ? Number(currentChat.unreadCount || 0) + 1
+                    : Number(currentChat.unreadCount || 0)
+            };
+
+            return [
+                updatedChat,
+                ...prev.filter((_, index) => index !== currentIndex)
+            ];
+        });
+    }, [user?.id]);
+
+    const handleUnreadCountEvent = useCallback((payload) => {
+        const roomId = Number(payload?.roomId);
+        const unreadCount = Number(payload?.unreadCount);
+
+        if (!roomId || Number.isNaN(unreadCount)) {
+            return;
+        }
+
+        setChats((prev) =>
+            prev.map((chat) =>
+                Number(chat.roomId) === roomId
+                    ? {...chat, unreadCount: Math.max(0, unreadCount)}
+                    : chat
+            )
+        );
     }, []);
+
+    useEffect(() => {
+        if (!token || !user?.id) {
+            return;
+        }
+
+        shouldReconnectRef.current = true;
+
+        const connect = () => {
+            if (!shouldReconnectRef.current) {
+                return;
+            }
+
+            if (wsRef.current) {
+                wsRef.current.close();
+                wsRef.current = null;
+            }
+
+            const ws = new WebSocket(`ws://localhost:8086/ws/chat?token=${token}`);
+            let pingInterval = null;
+
+            ws.onopen = () => {
+                ws.send(JSON.stringify({
+                    type: 'USER_ONLINE',
+                    userId: user.id
+                }));
+
+                pingInterval = setInterval(() => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'PING' }));
+                    }
+                }, 25000);
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'MESSAGE') {
+                        handleMessageEvent(data);
+                        return;
+                    }
+                    if (data.type === 'UNREAD_COUNT') {
+                        handleUnreadCountEvent(data);
+                    }
+                } catch (e) {
+                    // ignore invalid payloads
+                }
+            };
+
+            ws.onclose = () => {
+                if (pingInterval) {
+                    clearInterval(pingInterval);
+                    pingInterval = null;
+                }
+                wsRef.current = null;
+
+                if (!shouldReconnectRef.current) {
+                    return;
+                }
+
+                reconnectTimeoutRef.current = setTimeout(() => {
+                    connect();
+                }, 3000);
+            };
+
+            ws.onerror = () => {
+                // reconnect handled by onclose
+            };
+
+            wsRef.current = ws;
+        };
+
+        connect();
+
+        return () => {
+            shouldReconnectRef.current = false;
+
+            if (reconnectTimeoutRef.current) {
+                clearTimeout(reconnectTimeoutRef.current);
+                reconnectTimeoutRef.current = null;
+            }
+
+            if (wsRef.current) {
+                wsRef.current.close();
+                wsRef.current = null;
+            }
+        };
+    }, [token, user?.id, handleMessageEvent, handleUnreadCountEvent]);
 
     /* ================= UI ================= */
     if (loading) {
