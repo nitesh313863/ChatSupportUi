@@ -2,8 +2,11 @@ import React, {useEffect, useRef, useState, useCallback} from 'react';
 import api from '../../utils/api';
 import { buildChatWsUrl } from '../../utils/ws';
 import toast from 'react-hot-toast';
-import {Send, ArrowLeft, Loader, User, Wifi, WifiOff} from 'lucide-react';
+import {Send, ArrowLeft, Loader, User, Wifi, WifiOff, Paperclip, Mic, Video, Square, X} from 'lucide-react';
 import {useParams, useLocation, useNavigate} from 'react-router-dom';
+
+const MEDIA_PLACEHOLDER_TEXTS = new Set(['[Image]', '[Video]', '[Audio]', '[File]']);
+const MAX_MEDIA_BASE64_LENGTH = 900000;
 
 const PrivateChatPage = () => {
     const {roomId} = useParams();
@@ -16,12 +19,19 @@ const PrivateChatPage = () => {
     const [isWsConnected, setIsWsConnected] = useState(false);
     const [connectionStatus, setConnectionStatus] = useState('connecting');
     const [typingUserId, setTypingUserId] = useState(null);
+    const [pendingMedia, setPendingMedia] = useState(null);
+    const [isRecordingAudio, setIsRecordingAudio] = useState(false);
+    const [isRecordingVideo, setIsRecordingVideo] = useState(false);
 
     const typingTimeoutRef = useRef(null);
     const connectionRetryRef = useRef(null);
     const typingDebounceRef = useRef(null);
     const shouldReconnectRef = useRef(false);
     const manualCloseRef = useRef(false);
+    const fileInputRef = useRef(null);
+    const mediaRecorderRef = useRef(null);
+    const mediaStreamRef = useRef(null);
+    const mediaChunksRef = useRef([]);
 
     const [presence, setPresence] = useState({
         online: false,
@@ -42,6 +52,170 @@ const PrivateChatPage = () => {
     const isChatActive = useCallback(() => {
         return document.visibilityState === 'visible';
     }, []);
+
+    const getMessageTypeFromMime = (mimeType = '') => {
+        if (mimeType.startsWith('image/')) return 'IMAGE';
+        if (mimeType.startsWith('video/')) return 'VIDEO';
+        if (mimeType.startsWith('audio/')) return 'AUDIO';
+        return 'FILE';
+    };
+
+    const buildDataUrl = (base64, mimeType) => {
+        if (!base64) return '';
+        return `data:${mimeType || 'application/octet-stream'};base64,${base64}`;
+    };
+
+    const fileToBase64 = (file) =>
+        new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+                const result = String(reader.result || '');
+                const parts = result.split(',');
+                resolve(parts.length > 1 ? parts[1] : '');
+            };
+            reader.onerror = () => reject(new Error('Failed to read file'));
+            reader.readAsDataURL(file);
+        });
+
+    const stopMediaStream = useCallback(() => {
+        if (!mediaStreamRef.current) return;
+        mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
+    }, []);
+
+    const resetRecorder = useCallback(() => {
+        mediaRecorderRef.current = null;
+        mediaChunksRef.current = [];
+        setIsRecordingAudio(false);
+        setIsRecordingVideo(false);
+        stopMediaStream();
+    }, [stopMediaStream]);
+
+    const setPendingMediaFromBlob = useCallback(async (blob, fallbackFileName) => {
+        const base64 = await fileToBase64(blob);
+        if (!base64) {
+            toast.error('Failed to process media');
+            return;
+        }
+        if (base64.length > MAX_MEDIA_BASE64_LENGTH) {
+            toast.error('Media too large. Send smaller file.');
+            return;
+        }
+
+        const mimeType = blob.type || 'application/octet-stream';
+        const extension = mimeType.split('/')[1] || 'bin';
+        const safeFileName = fallbackFileName || `media-${Date.now()}.${extension}`;
+        setPendingMedia({
+            base64,
+            mimeType,
+            fileName: safeFileName,
+            messageType: getMessageTypeFromMime(mimeType)
+        });
+    }, []);
+
+    const handleFilePick = async (event) => {
+        try {
+            const file = event.target.files?.[0];
+            if (!file) return;
+            const base64 = await fileToBase64(file);
+            if (!base64) {
+                toast.error('Failed to process selected file');
+                return;
+            }
+            if (base64.length > MAX_MEDIA_BASE64_LENGTH) {
+                toast.error('File too large. Send smaller file.');
+                return;
+            }
+
+            setPendingMedia({
+                base64,
+                mimeType: file.type || 'application/octet-stream',
+                fileName: file.name || `file-${Date.now()}`,
+                messageType: getMessageTypeFromMime(file.type || '')
+            });
+        } catch (error) {
+            toast.error('Failed to attach file');
+        } finally {
+            event.target.value = '';
+        }
+    };
+
+    const startAudioRecording = async () => {
+        try {
+            if (!navigator.mediaDevices || !window.MediaRecorder) {
+                toast.error('Audio recording is not supported in this browser');
+                return;
+            }
+
+            resetRecorder();
+            const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+            mediaStreamRef.current = stream;
+            mediaChunksRef.current = [];
+
+            const recorder = new MediaRecorder(stream);
+            recorder.ondataavailable = (e) => {
+                if (e.data && e.data.size > 0) {
+                    mediaChunksRef.current.push(e.data);
+                }
+            };
+            recorder.onstop = async () => {
+                const blob = new Blob(mediaChunksRef.current, {type: recorder.mimeType || 'audio/webm'});
+                await setPendingMediaFromBlob(blob, `voice-${Date.now()}.webm`);
+                resetRecorder();
+            };
+            recorder.start();
+            mediaRecorderRef.current = recorder;
+            setIsRecordingAudio(true);
+            setIsRecordingVideo(false);
+            toast.success('Audio recording started');
+        } catch (error) {
+            resetRecorder();
+            toast.error('Unable to start audio recording');
+        }
+    };
+
+    const startVideoRecording = async () => {
+        try {
+            if (!navigator.mediaDevices || !window.MediaRecorder) {
+                toast.error('Video recording is not supported in this browser');
+                return;
+            }
+
+            resetRecorder();
+            const stream = await navigator.mediaDevices.getUserMedia({audio: true, video: true});
+            mediaStreamRef.current = stream;
+            mediaChunksRef.current = [];
+
+            const recorder = new MediaRecorder(stream);
+            recorder.ondataavailable = (e) => {
+                if (e.data && e.data.size > 0) {
+                    mediaChunksRef.current.push(e.data);
+                }
+            };
+            recorder.onstop = async () => {
+                const blob = new Blob(mediaChunksRef.current, {type: recorder.mimeType || 'video/webm'});
+                await setPendingMediaFromBlob(blob, `video-${Date.now()}.webm`);
+                resetRecorder();
+            };
+            recorder.start();
+            mediaRecorderRef.current = recorder;
+            setIsRecordingVideo(true);
+            setIsRecordingAudio(false);
+            toast.success('Video recording started');
+        } catch (error) {
+            resetRecorder();
+            toast.error('Unable to start video recording');
+        }
+    };
+
+    const stopRecording = () => {
+        const recorder = mediaRecorderRef.current;
+        if (!recorder) return;
+        if (recorder.state !== 'inactive') {
+            recorder.stop();
+            toast.success('Recording saved');
+        }
+    };
 
     /* ================= NAVIGATE BACK ================= */
     const handleBack = () => {
@@ -67,6 +241,10 @@ const PrivateChatPage = () => {
                 senderId: m.senderId,
                 content: m.content,
                 sentAt: new Date(m.createdAt).getTime(),
+                messageType: m.messageType || 'TEXT',
+                mediaBase64: m.mediaBase64 || null,
+                mimeType: m.mimeType || null,
+                fileName: m.fileName || null,
                 delivered: m.deliveryStatus === 'DELIVERED' || m.deliveryStatus === 'READ',
                 read: m.deliveryStatus === 'READ'
             }));
@@ -284,6 +462,10 @@ const PrivateChatPage = () => {
                         content: data.content,
                         sentAt: data.sentAt || Date.now(),
                         receiverId: data.receiverId,
+                        messageType: data.messageType || 'TEXT',
+                        mediaBase64: data.mediaBase64 || null,
+                        mimeType: data.mimeType || null,
+                        fileName: data.fileName || null,
                         delivered: isDelivered,
                         read: isRead
                     };
@@ -350,7 +532,7 @@ const PrivateChatPage = () => {
 
     /* ================= SEND MESSAGE ================= */
     const sendMessage = async () => {
-        if (!text.trim()) return;
+        if (!text.trim() && !pendingMedia) return;
 
         // Clear typing indicator when sending
         setIsTyping(false);
@@ -362,10 +544,15 @@ const PrivateChatPage = () => {
         try {
             await api.post('/chat/private/send', {
                 roomId: Number(roomId),
-                message: text
+                message: text.trim(),
+                messageType: pendingMedia ? pendingMedia.messageType : 'TEXT',
+                mediaBase64: pendingMedia?.base64 || null,
+                fileName: pendingMedia?.fileName || null,
+                mimeType: pendingMedia?.mimeType || null
             });
 
             setText('');
+            setPendingMedia(null);
         } catch (error) {
             toast.error('Failed to send message');
             console.error('Send message error:', error);
@@ -450,15 +637,77 @@ const PrivateChatPage = () => {
                 clearTimeout(connectionRetryRef.current);
                 connectionRetryRef.current = null;
             }
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+                mediaRecorderRef.current.stop();
+            }
+            stopMediaStream();
 
             setIsTyping(false);
             setTypingUserId(null);
+            setPendingMedia(null);
+            setIsRecordingAudio(false);
+            setIsRecordingVideo(false);
         };
-    }, [roomId, user.id, loadMessages, connectWebSocket]);
+    }, [roomId, user.id, loadMessages, connectWebSocket, stopMediaStream]);
 
     useEffect(() => {
         bottomRef.current?.scrollIntoView({behavior: 'smooth'});
     }, [messages]);
+
+    const renderMessageBody = (msg) => {
+        const messageType = msg.messageType || 'TEXT';
+        const hasMedia = Boolean(msg.mediaBase64);
+        const mediaUrl = hasMedia ? buildDataUrl(msg.mediaBase64, msg.mimeType) : '';
+        const shouldShowCaption = Boolean(msg.content) && !MEDIA_PLACEHOLDER_TEXTS.has(msg.content);
+
+        if (messageType === 'IMAGE' && mediaUrl) {
+            return (
+                <div className="space-y-2">
+                    <img
+                        src={mediaUrl}
+                        alt={msg.fileName || 'Image'}
+                        className="max-h-64 rounded-lg object-cover"
+                    />
+                    {shouldShowCaption && <p className="break-words">{msg.content}</p>}
+                </div>
+            );
+        }
+
+        if (messageType === 'VIDEO' && mediaUrl) {
+            return (
+                <div className="space-y-2">
+                    <video className="max-h-64 rounded-lg w-full" controls src={mediaUrl} />
+                    {shouldShowCaption && <p className="break-words">{msg.content}</p>}
+                </div>
+            );
+        }
+
+        if (messageType === 'AUDIO' && mediaUrl) {
+            return (
+                <div className="space-y-2">
+                    <audio controls src={mediaUrl} className="w-full" />
+                    {shouldShowCaption && <p className="break-words">{msg.content}</p>}
+                </div>
+            );
+        }
+
+        if (messageType === 'FILE' && mediaUrl) {
+            return (
+                <div className="space-y-2">
+                    <a
+                        href={mediaUrl}
+                        download={msg.fileName || 'file'}
+                        className="underline font-medium"
+                    >
+                        {msg.fileName || 'Download file'}
+                    </a>
+                    {shouldShowCaption && <p className="break-words">{msg.content}</p>}
+                </div>
+            );
+        }
+
+        return <p className="break-words">{msg.content}</p>;
+    };
 
     /* ================= RENDER LOADING ================= */
     if (loading) {
@@ -567,7 +816,7 @@ const PrivateChatPage = () => {
                                         ? 'bg-green-500 text-white rounded-br-none'
                                         : 'bg-white text-gray-900 rounded-bl-none'
                                 }`}>
-                                    <p className="break-words">{msg.content}</p>
+                                    {renderMessageBody(msg)}
 
                                     <div className="flex items-center justify-end gap-1 text-[10px] opacity-80 mt-1">
                                         <span>
@@ -610,7 +859,97 @@ const PrivateChatPage = () => {
 
             {/* MESSAGE INPUT */}
             <div className="bg-white border-t px-3 py-3">
+                <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip"
+                    className="hidden"
+                    onChange={handleFilePick}
+                />
+
+                {pendingMedia && (
+                    <div className="mb-3 p-2 border rounded-lg bg-gray-50">
+                        <div className="flex items-center justify-between">
+                            <p className="text-xs text-gray-600 truncate pr-2">
+                                {pendingMedia.fileName}
+                            </p>
+                            <button
+                                type="button"
+                                onClick={() => setPendingMedia(null)}
+                                className="p-1 rounded hover:bg-gray-200"
+                            >
+                                <X className="h-4 w-4 text-gray-600" />
+                            </button>
+                        </div>
+                        {pendingMedia.messageType === 'IMAGE' && (
+                            <img
+                                src={buildDataUrl(pendingMedia.base64, pendingMedia.mimeType)}
+                                alt={pendingMedia.fileName || 'Selected image'}
+                                className="mt-2 max-h-40 rounded"
+                            />
+                        )}
+                        {pendingMedia.messageType === 'VIDEO' && (
+                            <video
+                                className="mt-2 max-h-40 rounded w-full"
+                                controls
+                                src={buildDataUrl(pendingMedia.base64, pendingMedia.mimeType)}
+                            />
+                        )}
+                        {pendingMedia.messageType === 'AUDIO' && (
+                            <audio
+                                className="mt-2 w-full"
+                                controls
+                                src={buildDataUrl(pendingMedia.base64, pendingMedia.mimeType)}
+                            />
+                        )}
+                    </div>
+                )}
+
                 <div className="flex items-center">
+                    <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={!isWsConnected}
+                        className={`p-2 rounded-full mr-2 ${
+                            isWsConnected ? 'hover:bg-gray-100 text-gray-600' : 'text-gray-300 cursor-not-allowed'
+                        }`}
+                        title="Attach image/file"
+                    >
+                        <Paperclip className="h-5 w-5" />
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={isRecordingAudio ? stopRecording : startAudioRecording}
+                        disabled={!isWsConnected || isRecordingVideo}
+                        className={`p-2 rounded-full mr-2 ${
+                            isRecordingAudio
+                                ? 'bg-red-100 text-red-600'
+                                : isWsConnected && !isRecordingVideo
+                                    ? 'hover:bg-gray-100 text-gray-600'
+                                    : 'text-gray-300 cursor-not-allowed'
+                        }`}
+                        title={isRecordingAudio ? 'Stop audio recording' : 'Record audio'}
+                    >
+                        {isRecordingAudio ? <Square className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={isRecordingVideo ? stopRecording : startVideoRecording}
+                        disabled={!isWsConnected || isRecordingAudio}
+                        className={`p-2 rounded-full mr-2 ${
+                            isRecordingVideo
+                                ? 'bg-red-100 text-red-600'
+                                : isWsConnected && !isRecordingAudio
+                                    ? 'hover:bg-gray-100 text-gray-600'
+                                    : 'text-gray-300 cursor-not-allowed'
+                        }`}
+                        title={isRecordingVideo ? 'Stop video recording' : 'Record video'}
+                    >
+                        {isRecordingVideo ? <Square className="h-5 w-5" /> : <Video className="h-5 w-5" />}
+                    </button>
+
                     <div className="flex-1 relative">
                         <input
                             type="text"
@@ -638,9 +977,9 @@ const PrivateChatPage = () => {
 
                     <button
                         onClick={sendMessage}
-                        disabled={!text.trim() || !isWsConnected}
+                        disabled={(!text.trim() && !pendingMedia) || !isWsConnected}
                         className={`ml-3 p-3 rounded-full flex items-center justify-center ${
-                            text.trim() && isWsConnected
+                            (text.trim() || pendingMedia) && isWsConnected
                                 ? 'bg-green-600 hover:bg-green-700 text-white'
                                 : 'bg-gray-200 text-gray-400 cursor-not-allowed'
                         } transition-colors`}
