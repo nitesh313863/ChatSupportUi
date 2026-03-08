@@ -1,4 +1,4 @@
-import React, {useState, useEffect} from 'react';
+﻿import React, {useState, useEffect} from 'react';
 import api from '../../utils/api';
 import toast from 'react-hot-toast';
 import {
@@ -52,11 +52,7 @@ const ContactsPage = () => {
 
             if (response && response.data) {
                 const raw = response.data.data ? response.data.data : response.data;
-                setContacts((raw || []).map(c => ({ 
-                    ...c, 
-                    online: Boolean(c.online),
-                    lastSeen: c.lastSeen || null
-                })));
+                setContacts((raw || []).map(c => ({ ...c, online: Boolean(c.online) })));
             } else {
                 setContacts([]);
             }
@@ -73,26 +69,14 @@ const ContactsPage = () => {
             const data = event.detail;
             if (!data || !data.type) return;
 
-            if (data.type === 'USER_ONLINE') {
+            if (data.type === 'USER_ONLINE' || data.type === 'USER_OFFLINE') {
                 const userId = Number(data.userId);
-                console.log('[USER_ONLINE] userId:', userId);
                 setContacts(prev => prev.map(c => {
-                    const contactUserId = Number(c.contactId);
+                    // contactId or contact.contactId may be used depending on API
+                    const contactUserId = Number(c.contactId ?? c.id ?? c.userId ?? -1);
+                    if (!Number.isFinite(contactUserId)) return c;
                     if (contactUserId === userId) {
-                        console.log('[USER_ONLINE] Match found for contactId:', contactUserId);
-                        return { ...c, online: true, lastSeen: null };
-                    }
-                    return c;
-                }));
-            } else if (data.type === 'USER_OFFLINE') {
-                const userId = Number(data.userId);
-                const lastSeen = data.lastSeen || Date.now();
-                console.log('[USER_OFFLINE] userId:', userId, 'lastSeen:', lastSeen);
-                setContacts(prev => prev.map(c => {
-                    const contactUserId = Number(c.contactId);
-                    if (contactUserId === userId) {
-                        console.log('[USER_OFFLINE] Match found for contactId:', contactUserId);
-                        return { ...c, online: false, lastSeen: lastSeen };
+                        return { ...c, online: data.type === 'USER_ONLINE' };
                     }
                     return c;
                 }));
@@ -132,6 +116,8 @@ const ContactsPage = () => {
         }
 
         try {
+            // Note: You need to implement delete contact endpoint
+            // await api.delete(`/contacts/${contactId}`);
             toast.success('Contact deleted successfully');
             setContacts(contacts.filter(contact => contact.id !== contactId));
             setOpenMenuId(null);
@@ -152,6 +138,7 @@ const ContactsPage = () => {
             });
 
             toast.success('User blocked successfully');
+            // Remove from contacts list when blocked
             setContacts(contacts.filter(c => c.id !== contact.id));
             setOpenMenuId(null);
         } catch (error) {
@@ -173,7 +160,7 @@ const ContactsPage = () => {
                 userId: contact.contactId
             });
 
-            const roomId = res.data;
+            const roomId = res.data; // ResponseModel → data
 
             navigate(`/chat/${roomId}`, {
                 state: {
@@ -201,29 +188,12 @@ const ContactsPage = () => {
 
     const formatPhone = (phone) => {
         if (!phone) return 'N/A';
+        // Remove any non-digits and format
         const cleaned = phone.toString().replace(/\D/g, '');
         if (cleaned.length === 10) {
             return cleaned.replace(/(\d{3})(\d{3})(\d{4})/, '$1-$2-$3');
         }
         return phone;
-    };
-
-    const formatLastSeen = (lastSeen) => {
-        if (!lastSeen) return '';
-        const now = Date.now();
-        const diff = now - lastSeen;
-        
-        const seconds = Math.floor(diff / 1000);
-        const minutes = Math.floor(seconds / 60);
-        const hours = Math.floor(minutes / 60);
-        const days = Math.floor(hours / 24);
-
-        if (seconds < 60) return 'Just now';
-        if (minutes < 60) return `${minutes}m ago`;
-        if (hours < 24) return `${hours}h ago`;
-        if (days < 7) return `${days}d ago`;
-        
-        return new Date(lastSeen).toLocaleDateString();
     };
 
     if (loading) {
@@ -309,7 +279,9 @@ const ContactsPage = () => {
                                 key={contact.id}
                                 className="px-6 py-6 hover:bg-gray-50 transition-colors"
                             >
+                                {/* Contact Header with Avatar and Basic Info */}
                                 <div className="flex flex-col md:flex-row md:items-start gap-6">
+                                    {/* Left Column - Contact Details */}
                                     <div className="flex-1">
                                         <div className="flex items-start gap-4">
                                             <div className="flex-shrink-0">
@@ -323,13 +295,13 @@ const ContactsPage = () => {
                                                     className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                                                     <div>
                                                         <h3 className="text-xl font-bold text-gray-900 flex items-center gap-2">
-                                                            {contact.contactName || 'Unnamed Contact'}
-                                                            {contact.online ? (
-                                                                <span title="Online" className="inline-block h-2.5 w-2.5 rounded-full bg-green-500 shadow-md" />
-                                                            ) : (
-                                                                <span title="Offline" className="inline-block h-2.5 w-2.5 rounded-full bg-gray-300" />
-                                                            )}
-                                                        </h3>
+                                                                    {contact.contactName || 'Unnamed Contact'}
+                                                                    {contact.online ? (
+                                                                        <span title="Online" className="inline-block h-2.5 w-2.5 rounded-full bg-green-500 shadow-md" />
+                                                                    ) : (
+                                                                        <span title="Offline" className="inline-block h-2.5 w-2.5 rounded-full bg-gray-300" />
+                                                                    )}
+                                                                </h3>
                                                         <div className="flex items-center mt-2 text-lg text-gray-700">
                                                             <Phone className="h-5 w-5 mr-2"/>
                                                             {formatPhone(contact.contactPhone)}
@@ -342,13 +314,9 @@ const ContactsPage = () => {
                                                                 on {new Date(contact.addedDate).toLocaleDateString()}
                                                             </div>
                                                         )}
-                                                        {!contact.online && contact.lastSeen && (
-                                                            <div className="flex items-center mt-2 text-sm text-gray-500">
-                                                                <span>Last seen: {formatLastSeen(contact.lastSeen)}</span>
-                                                            </div>
-                                                        )}
                                                     </div>
                                                     <div className="flex items-center space-x-2 mt-2 sm:mt-0">
+                                                        {/* Message Button */}
                                                         <button
                                                             onClick={() => handleSendMessage(contact)}
                                                             className="p-3 text-white bg-green-500 hover:bg-green-600 rounded-full transition-colors shadow-sm"
@@ -357,6 +325,7 @@ const ContactsPage = () => {
                                                             <MessageSquare className="h-5 w-5"/>
                                                         </button>
 
+                                                        {/* Actions Dropdown Menu */}
                                                         <div className="relative">
                                                             <button
                                                                 onClick={(e) => toggleMenu(e, contact.id)}
@@ -365,12 +334,14 @@ const ContactsPage = () => {
                                                             >
                                                                 <MoreVertical className="h-5 w-5"/>
                                                             </button>
+                                                            {/* Dropdown Menu */}
                                                             {openMenuId === contact.id && (
                                                                 <div
                                                                     className="absolute right-0 top-full mt-3 w-52 bg-white rounded-xl shadow-2xl z-50 border border-gray-200"
                                                                     onClick={(e) => e.stopPropagation()}
                                                                 >
                                                                     <div className="py-2">
+                                                                        {/* View Profile */}
                                                                         <button
                                                                             onClick={() => handleViewProfile(contact)}
                                                                             className="flex items-center w-full px-5 py-3 text-sm text-gray-700 hover:bg-gray-100"
@@ -379,6 +350,7 @@ const ContactsPage = () => {
                                                                             View Profile
                                                                         </button>
 
+                                                                        {/* Block User */}
                                                                         <button
                                                                             onClick={() => handleBlockUser(contact)}
                                                                             disabled={blockingUserId === contact.contactId}
@@ -399,6 +371,7 @@ const ContactsPage = () => {
 
                                                                         <div className="border-t my-2" />
 
+                                                                        {/* Delete */}
                                                                         <button
                                                                             onClick={() => handleDeleteContact(contact.id)}
                                                                             className="flex items-center w-full px-5 py-3 text-sm text-red-600 hover:bg-red-50"
@@ -424,7 +397,7 @@ const ContactsPage = () => {
                 )}
             </div>
 
-            {/* Overall Statistics */}
+            {/* Overall Statistics - Only shown when no specific contact is selected */}
             {!selectedContact && contacts.length > 0 && (
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div className="bg-blue-50 p-4 rounded-xl border border-blue-200">
@@ -440,8 +413,8 @@ const ContactsPage = () => {
                         <div className="flex items-start gap-4">
                             <MessageSquare className="h-8 w-8 text-green-600"/>
                             <div>
-                                <p className="text-sm font-medium text-gray-600">Online Now</p>
-                                <p className="text-2xl font-semibold text-gray-900">{contacts.filter(c => c.online).length}</p>
+                                <p className="text-sm font-medium text-gray-600">Available</p>
+                                <p className="text-2xl font-semibold text-gray-900">{contacts.length}</p>
                             </div>
                         </div>
                     </div>
@@ -449,8 +422,8 @@ const ContactsPage = () => {
                         <div className="flex items-start gap-4">
                             <Shield className="h-8 w-8 text-purple-600"/>
                             <div>
-                                <p className="text-sm font-medium text-gray-600">Offline</p>
-                                <p className="text-2xl font-semibold text-gray-900">{contacts.filter(c => !c.online).length}</p>
+                                <p className="text-sm font-medium text-gray-600">Active</p>
+                                <p className="text-2xl font-semibold text-gray-900">{contacts.length}</p>
                             </div>
                         </div>
                     </div>

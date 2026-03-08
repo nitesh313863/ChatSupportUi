@@ -1,37 +1,15 @@
-/* src/index.css */
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-body {
-  margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-  'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-  sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-/* Custom styles */
-.btn-primary {
-  @apply px-4 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors;
-}
-
-.btn-secondary {
-  @apply px-4 py-2 bg-gray-200 text-gray-800 font-medium rounded-lg hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition-colors;
-}
-
-.input-field {
-  @apply w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500;
-}
-
 /* WhatsApp-like UI overrides */
-:root {
+:root{
   --wa-bg: #efeae2;
-  --wa-sent: #dcf8c6;
+  --wa-sent: #dcf8c6; /* slightly lighter than WhatsApp */
   --wa-recv: #ffffff;
   --wa-accent: #25d366;
   --wa-muted: #667781;
+}
+
+/* Global chat font and sizing */
+body, .chat-list-root, .private-chat {
+  font-family: 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
 }
 
 /* Left sidebar tweaks */
@@ -50,6 +28,10 @@ body {
   height: 100%;
 }
 
+.private-chat > .relative > .absolute[inset-0] {
+  /* keep existing overlay if present */
+}
+
 .private-chat .relative.h-full.overflow-y-auto {
   background-image: radial-gradient(rgba(0,0,0,0.02) 1px, transparent 1px), radial-gradient(rgba(0,0,0,0.015) 1px, transparent 1px);
   background-position: 0 0, 24px 24px;
@@ -58,8 +40,8 @@ body {
 
 /* Message bubble base */
 .private-chat .message-bubble {
-  border-radius: 7.5px !important;
-  box-shadow: 0 1px 0.5px rgba(0,0,0,0.13);
+  border-radius: 8px !important;
+  box-shadow: 0 1px 0 rgba(0,0,0,0.06);
   padding: 10px 12px;
   line-height: 1.3;
 }
@@ -70,18 +52,20 @@ body {
   margin-left: 6px;
 }
 
-/* Sent (right) messages – WhatsApp asymmetrical shape */
+/* Sent (right) messages */
 .private-chat .message-bubble.mine {
   background: var(--wa-sent) !important;
   color: #111b21;
-  border-radius: 7.5px 7.5px 4px 7.5px !important;
+  border-bottom-right-radius: 6px !important;
+  border-bottom-left-radius: 12px !important;
 }
 
 /* Received (left) messages */
 .private-chat .message-bubble.their {
   background: var(--wa-recv) !important;
   color: #111b21;
-  border-radius: 7.5px 7.5px 7.5px 4px !important;
+  border-bottom-left-radius: 6px !important;
+  border-bottom-right-radius: 12px !important;
 }
 
 /* Input area rounded */

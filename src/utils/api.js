@@ -37,8 +37,8 @@ api.interceptors.response.use(
                     window.location.href = '/login';
                     toast.error('Session expired. Please login again.');
                     break;
-                case 401:
-                    toast.error('Access denied');
+                case 400:
+                    toast.error('Invalid request');
                     break;
                 case 403:
                     toast.error('forbidding');

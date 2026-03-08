@@ -19,8 +19,10 @@ const Layout = () => {
     const { user, logout } = useAuth();
     const location = useLocation();
     const wsRef = useRef(null);
-    const reconnectTimeoutRef = useRef(null);
+    const reconnectTimerRef = useRef(null);
+    const pingTimerRef = useRef(null);
     const shouldReconnectRef = useRef(false);
+    const connectSeqRef = useRef(0);
 
     const navItems = [
         { path: '/chats', label: 'Chats', icon: MessageCircle },
@@ -28,54 +30,103 @@ const Layout = () => {
         { path: '/blocked', label: 'Blocked Users', icon: UserX },
     ];
 
+    const isChatExperience =
+        location.pathname === '/chats' ||
+        location.pathname.startsWith('/chats/') ||
+        location.pathname.startsWith('/chat/');
+
+    const isPrivateChatRoute =
+        location.pathname.startsWith('/chat/') ||
+        location.pathname.startsWith('/chats/');
+
     useEffect(() => {
-        const token = localStorage.getItem('token');
-        if (!token || !user?.id) {
+        // Private chat page has its own dedicated socket
+        if (isPrivateChatRoute || !user?.id) {
+            shouldReconnectRef.current = false;
+
+            if (reconnectTimerRef.current) {
+                clearTimeout(reconnectTimerRef.current);
+                reconnectTimerRef.current = null;
+            }
+            if (pingTimerRef.current) {
+                clearInterval(pingTimerRef.current);
+                pingTimerRef.current = null;
+            }
+            if (wsRef.current) {
+                wsRef.current.close();
+                wsRef.current = null;
+            }
             return;
         }
 
         shouldReconnectRef.current = true;
 
         const connect = () => {
-            if (!shouldReconnectRef.current) {
-                return;
-            }
+            const token = localStorage.getItem('token');
+            if (!token || !shouldReconnectRef.current) return;
 
             if (wsRef.current) {
                 wsRef.current.close();
                 wsRef.current = null;
             }
 
+            const seq = ++connectSeqRef.current;
             const ws = new WebSocket(buildChatWsUrl(token));
-            let pingInterval = null;
 
             ws.onopen = () => {
-                pingInterval = setInterval(() => {
+                if (seq !== connectSeqRef.current) return;
+
+                ws.send(JSON.stringify({
+                    type: 'ROOM_CLOSE',
+                    userId: user.id
+                }));
+
+                if (pingTimerRef.current) {
+                    clearInterval(pingTimerRef.current);
+                }
+
+                pingTimerRef.current = setInterval(() => {
                     if (ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({ type: 'PING' }));
                     }
                 }, 25000);
             };
 
+            ws.onmessage = (event) => {
+                if (seq !== connectSeqRef.current) return;
+
+                try {
+                    const payload = JSON.parse(event.data);
+                    
+                    if (payload.type === 'USER_ONLINE' || payload.type === 'USER_OFFLINE') {
+                        console.log('[WS-PRESENCE-EVENT]', payload);
+                    }
+                    
+                    window.dispatchEvent(new CustomEvent('chat-ws-event', { detail: payload }));
+                } catch (error) {
+                    console.error('[WS-PARSE-ERROR]', error);
+                }
+            };
+
             ws.onclose = () => {
-                if (pingInterval) {
-                    clearInterval(pingInterval);
-                    pingInterval = null;
+                if (seq !== connectSeqRef.current) return;
+
+                if (pingTimerRef.current) {
+                    clearInterval(pingTimerRef.current);
+                    pingTimerRef.current = null;
                 }
 
                 wsRef.current = null;
 
-                if (!shouldReconnectRef.current) {
-                    return;
-                }
+                if (!shouldReconnectRef.current) return;
 
-                reconnectTimeoutRef.current = setTimeout(() => {
+                reconnectTimerRef.current = setTimeout(() => {
                     connect();
                 }, 3000);
             };
 
-            ws.onerror = () => {
-                // reconnect handled by onclose
+            ws.onerror = (error) => {
+                console.error('[WS-ERROR]', error);
             };
 
             wsRef.current = ws;
@@ -86,22 +137,25 @@ const Layout = () => {
         return () => {
             shouldReconnectRef.current = false;
 
-            if (reconnectTimeoutRef.current) {
-                clearTimeout(reconnectTimeoutRef.current);
-                reconnectTimeoutRef.current = null;
+            if (reconnectTimerRef.current) {
+                clearTimeout(reconnectTimerRef.current);
+                reconnectTimerRef.current = null;
             }
-
+            if (pingTimerRef.current) {
+                clearInterval(pingTimerRef.current);
+                pingTimerRef.current = null;
+            }
             if (wsRef.current) {
                 wsRef.current.close();
                 wsRef.current = null;
             }
         };
-    }, [user?.id]);
+    }, [isPrivateChatRoute, user?.id]);
 
     return (
         <div className="flex h-screen bg-gray-100">
             {/* Mobile sidebar */}
-            {isSidebarOpen && (
+            {isSidebarOpen && !isChatExperience && (
                 <div className="fixed inset-0 z-40 lg:hidden">
                     <div
                         className="fixed inset-0 bg-gray-600 bg-opacity-75"
@@ -144,9 +198,10 @@ const Layout = () => {
             )}
 
             {/* Desktop sidebar */}
-            <div className="hidden lg:flex lg:w-64 lg:flex-col lg:fixed lg:inset-y-0">
+            {!isChatExperience && (
+                <div className="hidden lg:flex lg:w-64 lg:flex-col lg:fixed lg:inset-y-0">
                 <div className="flex flex-col flex-1 bg-white border-r">
-                    <div className="flex-1 flex flex-col pt-5 pb-4 overflow-y-auto">
+                    <div className="flex flex-col flex-1 pt-5 pb-4 overflow-y-auto">
                         <div className="flex items-center flex-shrink-0 px-4">
                             <Shield className="h-8 w-8 text-blue-600 mr-2" />
                             <h1 className="text-xl font-bold text-gray-900">Chat Support</h1>
@@ -203,12 +258,14 @@ const Layout = () => {
                     </div>
 
                 </div>
-            </div>
+                </div>
+            )}
 
             {/* Main content */}
-            <div className="flex-1 lg:pl-64 flex flex-col">
+            <div className={`flex-1 flex flex-col ${isChatExperience ? '' : 'lg:pl-64'}`}>
                 {/* Top bar */}
-                <div className="sticky top-0 z-10 lg:hidden pl-1 pt-1 sm:pl-3 sm:pt-3 bg-white border-b">
+                {!isChatExperience && (
+                    <div className="sticky top-0 z-10 lg:hidden pl-1 pt-1 sm:pl-3 sm:pt-3 bg-white border-b">
                     <button
                         type="button"
                         className="p-3 text-gray-500 hover:text-gray-900"
@@ -216,10 +273,11 @@ const Layout = () => {
                     >
                         <Menu className="h-6 w-6" />
                     </button>
-                </div>
+                    </div>
+                )}
 
                 {/* Page content */}
-                <main className="flex-1 p-4 md:p-6">
+                <main className={`flex-1 ${isChatExperience ? 'p-0' : 'p-4 md:p-6'}`}>
                     <Outlet />
                 </main>
             </div>

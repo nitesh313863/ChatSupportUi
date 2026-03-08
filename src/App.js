@@ -48,11 +48,10 @@ function App() {
                             <Route path="/" element={<Layout />}>
 
                                 {/* Default */}
-                                <Route index element={<Navigate to="/contacts" replace />} />
-
                                 <Route index element={<Navigate to="/chats" replace />} />
 
                                 <Route path="chats" element={<ChatListPage />} />
+                                <Route path="chats/:roomId" element={<ChatListPage />} />
 
                                 {/* Contacts */}
                                 <Route path="contacts" element={<ContactsPage />} />
