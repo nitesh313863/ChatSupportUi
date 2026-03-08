@@ -1,4 +1,4 @@
-import React, {useEffect, useRef, useState, useCallback} from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import api from '../../utils/api';
 import { buildChatWsUrl } from '../../utils/ws';
 import toast from 'react-hot-toast';
@@ -21,13 +21,14 @@ import {
     Search,
     Smile
 } from 'lucide-react';
-import {useParams, useLocation, useNavigate} from 'react-router-dom';
+import { useParams, useLocation, useNavigate } from 'react-router-dom';
 
 const MEDIA_PLACEHOLDER_TEXTS = new Set(['[Image]', '[Video]', '[Audio]', '[File]']);
 const MAX_MEDIA_BASE64_LENGTH = 900000;
+const PAGE_SIZE = 20;
 
 const PrivateChatPage = () => {
-    const {roomId} = useParams();
+    const { roomId } = useParams();
     const navigate = useNavigate();
 
     const [messages, setMessages] = useState([]);
@@ -52,6 +53,11 @@ const PrivateChatPage = () => {
     const mediaStreamRef = useRef(null);
     const mediaChunksRef = useRef(null);
 
+    const [page, setPage] = useState(0);
+    const [hasMore, setHasMore] = useState(true);
+    const [loadingMore, setLoadingMore] = useState(false);
+    const chatContainerRef = useRef(null);
+
     const [presence, setPresence] = useState({
         online: false,
         lastSeen: null
@@ -72,6 +78,78 @@ const PrivateChatPage = () => {
     const isChatActive = useCallback(() => {
         return document.visibilityState === 'visible';
     }, []);
+
+
+    /* ================= PAGINATED LOAD ================= */
+const loadMessages = useCallback(async (pageNumber = 0, scrollInfo = null) => {
+    try {
+        if (pageNumber === 0) setLoading(true);
+
+        const res = await api.get(`/chat/rooms/${roomId}/messages/paginated`, {
+            params: { page: pageNumber, size: PAGE_SIZE }
+        });
+
+        const pageData = res?.data;
+        if (!pageData) throw new Error("Invalid API response");
+
+        const mapped = pageData.content.map(m => ({
+            messageId: m.messageId,
+            roomId: m.roomId,
+            senderId: m.senderId,
+            content: m.content,
+            sentAt: new Date(m.createdAt).getTime(),
+            messageType: m.messageType || 'TEXT',
+            mediaBase64: m.mediaBase64 || null,
+            mimeType: m.mimeType || null,
+            fileName: m.fileName || null,
+            delivered: m.deliveryStatus === 'DELIVERED' || m.deliveryStatus === 'READ',
+            read: m.deliveryStatus === 'READ'
+        }));
+
+        if (pageNumber === 0) {
+            setMessages(mapped.reverse());
+        } else {
+            setMessages(prev => [...mapped.reverse(), ...prev]);
+        }
+
+        setPage(pageData.pageNumber);
+        setHasMore(pageData.hasNext);
+
+        // Scroll position maintain (जब ऊपर से नए messages load हों)
+        if (scrollInfo && chatContainerRef.current) {
+            const { oldScrollHeight, oldScrollTop } = scrollInfo;
+            setTimeout(() => {
+                const newScrollHeight = chatContainerRef.current.scrollHeight;
+                chatContainerRef.current.scrollTop = newScrollHeight - oldScrollHeight + oldScrollTop;
+            }, 0);
+        }
+
+    } catch (err) {
+        console.error("LOAD MESSAGE ERROR:", err);
+        toast.error('Failed to load messages');
+    } finally {
+        setLoading(false);
+    }
+}, [roomId]);
+    /* ================= SCROLL LOAD ================= */
+const handleScroll = () => {
+    const div = chatContainerRef.current;
+    if (!div) return;
+
+  
+    if (div.scrollTop < 50 && hasMore && !loadingMore) {
+        const nextPage = page + 1;
+        setLoadingMore(true);
+
+
+        const oldScrollHeight = div.scrollHeight;
+        const oldScrollTop = div.scrollTop;
+
+        loadMessages(nextPage, { oldScrollHeight, oldScrollTop }).finally(() => {
+            setLoadingMore(false);
+        });
+    }
+};
 
     const getMessageTypeFromMime = (mimeType = '') => {
         if (mimeType.startsWith('image/')) return 'IMAGE';
@@ -168,7 +246,7 @@ const PrivateChatPage = () => {
             }
 
             resetRecorder();
-            const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             mediaStreamRef.current = stream;
             mediaChunksRef.current = [];
 
@@ -179,7 +257,7 @@ const PrivateChatPage = () => {
                 }
             };
             recorder.onstop = async () => {
-                const blob = new Blob(mediaChunksRef.current, {type: recorder.mimeType || 'audio/webm'});
+                const blob = new Blob(mediaChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
                 await setPendingMediaFromBlob(blob, `voice-${Date.now()}.webm`);
                 resetRecorder();
             };
@@ -202,7 +280,7 @@ const PrivateChatPage = () => {
             }
 
             resetRecorder();
-            const stream = await navigator.mediaDevices.getUserMedia({audio: true, video: true});
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
             mediaStreamRef.current = stream;
             mediaChunksRef.current = [];
 
@@ -213,7 +291,7 @@ const PrivateChatPage = () => {
                 }
             };
             recorder.onstop = async () => {
-                const blob = new Blob(mediaChunksRef.current, {type: recorder.mimeType || 'video/webm'});
+                const blob = new Blob(mediaChunksRef.current, { type: recorder.mimeType || 'video/webm' });
                 await setPendingMediaFromBlob(blob, `video-${Date.now()}.webm`);
                 resetRecorder();
             };
@@ -249,39 +327,6 @@ const PrivateChatPage = () => {
         navigate(-1);
     };
 
-    /* ================= LOAD CHAT HISTORY ================= */
-    const loadMessages = useCallback(async () => {
-        try {
-            setLoading(true);
-            const res = await api.get(`/chat/rooms/${roomId}/messages`);
-
-            const mapped = (res.data || []).map(m => ({
-                messageId: m.messageId,
-                roomId: m.roomId,
-                senderId: m.senderId,
-                content: m.content,
-                sentAt: new Date(m.createdAt).getTime(),
-                messageType: m.messageType || 'TEXT',
-                mediaBase64: m.mediaBase64 || null,
-                mimeType: m.mimeType || null,
-                fileName: m.fileName || null,
-                delivered: m.deliveryStatus === 'DELIVERED' || m.deliveryStatus === 'READ',
-                read: m.deliveryStatus === 'READ'
-            }));
-
-            const inferredOtherUserId = mapped.find(m => Number(m.senderId) !== currentUserId)?.senderId;
-            if (inferredOtherUserId && inferredOtherUserId !== otherUserIdRef.current) {
-                otherUserIdRef.current = inferredOtherUserId;
-                setOtherUserId(inferredOtherUserId);
-            }
-            setMessages(mapped);
-
-        } catch (err) {
-            toast.error('Failed to load messages');
-        } finally {
-            setLoading(false);
-        }
-    }, [currentUserId, roomId]);
 
     /* ================= TYPING HANDLER ================= */
     const handleTyping = useCallback(() => {
@@ -366,7 +411,7 @@ const PrivateChatPage = () => {
             }));
 
             if (isChatActive()) {
-                api.post(`/chat/rooms/${roomId}/read`).catch(() => {});
+                api.post(`/chat/rooms/${roomId}/read`).catch(() => { });
             }
         };
 
@@ -393,7 +438,7 @@ const PrivateChatPage = () => {
                     setMessages(prev =>
                         prev.map(m =>
                             m.messageId === data.messageId && Number(m.senderId) === currentUserId
-                                ? {...m, delivered: true, read: true}
+                                ? { ...m, delivered: true, read: true }
                                 : m
                         )
                     );
@@ -404,7 +449,7 @@ const PrivateChatPage = () => {
                     setMessages(prev =>
                         prev.map(m =>
                             m.messageId === data.messageId && Number(m.senderId) === currentUserId
-                                ? {...m, delivered: true}
+                                ? { ...m, delivered: true }
                                 : m
                         )
                     );
@@ -415,26 +460,26 @@ const PrivateChatPage = () => {
                 if (data.type === 'USER_ONLINE') {
                     const incomingUserId = Number(data.userId);
                     const trackedOtherUserId = Number(otherUserIdRef.current);
-                    
+
                     console.log('[PRESENCE] USER_ONLINE - incoming:', incomingUserId, 'tracked:', trackedOtherUserId);
-                    
+
                     // Skip if it's the current user
                     if (incomingUserId === currentUserId) {
                         console.log('[PRESENCE] Skipping - self event');
                         return;
                     }
-                    
+
                     // Update otherUserId if not set
                     if (otherUserIdRef.current == null) {
                         otherUserIdRef.current = incomingUserId;
                         setOtherUserId(incomingUserId);
                         console.log('[PRESENCE] Set otherUserId to:', incomingUserId);
                     }
-                    
+
                     // Check if this event is for the other user in this chat
-                    const isForOtherUser = (trackedOtherUserId > 0 && incomingUserId === trackedOtherUserId) 
+                    const isForOtherUser = (trackedOtherUserId > 0 && incomingUserId === trackedOtherUserId)
                         || (data.roomId && Number(data.roomId) === currentRoomId);
-                    
+
                     if (isForOtherUser) {
                         console.log('[PRESENCE] Setting online = true');
                         setPresence({
@@ -450,26 +495,26 @@ const PrivateChatPage = () => {
                     const incomingUserId = Number(data.userId);
                     const trackedOtherUserId = Number(otherUserIdRef.current);
                     const lastSeen = (data.lastSeen && data.lastSeen > 0) ? data.lastSeen : null;
-                    
+
                     console.log('[PRESENCE] USER_OFFLINE - incoming:', incomingUserId, 'tracked:', trackedOtherUserId, 'raw lastSeen:', data.lastSeen, 'processed:', lastSeen);
-                    
+
                     // Skip if it's the current user
                     if (incomingUserId === currentUserId) {
                         console.log('[PRESENCE] Skipping - self event');
                         return;
                     }
-                    
+
                     // Update otherUserId if not set
                     if (otherUserIdRef.current == null) {
                         otherUserIdRef.current = incomingUserId;
                         setOtherUserId(incomingUserId);
                         console.log('[PRESENCE] Set otherUserId to:', incomingUserId);
                     }
-                    
+
                     // Check if this event is for the other user in this chat
                     const isForOtherUser = (trackedOtherUserId > 0 && incomingUserId === trackedOtherUserId)
                         || (data.roomId && Number(data.roomId) === currentRoomId);
-                    
+
                     if (isForOtherUser) {
                         console.log('[PRESENCE] Setting online = false, lastSeen:', lastSeen);
                         setPresence({
@@ -725,7 +770,7 @@ const PrivateChatPage = () => {
     useEffect(() => {
         const handleVisible = () => {
             if (document.visibilityState === 'visible' && isWsConnected) {
-                api.post(`/chat/rooms/${roomId}/read`).catch(() => {});
+                api.post(`/chat/rooms/${roomId}/read`).catch(() => { });
             }
         };
 
@@ -739,7 +784,7 @@ const PrivateChatPage = () => {
         shouldReconnectRef.current = true;
         manualCloseRef.current = false;
 
-        loadMessages();
+        loadMessages(0);
         connectWebSocket();
 
         return () => {
@@ -785,7 +830,7 @@ const PrivateChatPage = () => {
     }, [currentRoomId, currentUserId, loadMessages, connectWebSocket, roomId, stopMediaStream]);
 
     useEffect(() => {
-        bottomRef.current?.scrollIntoView({behavior: 'smooth'});
+        bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
 
     const renderMessageBody = (msg) => {
@@ -800,7 +845,7 @@ const PrivateChatPage = () => {
                     <img
                         src={mediaUrl}
                         alt={msg.fileName || 'Image'}
-                        className="max-h-64 rounded-lg object-cover"
+                        className="max-h-64 max-w-full rounded-lg object-cover"
                     />
                     {shouldShowCaption && <p className="break-words">{msg.content}</p>}
                 </div>
@@ -810,7 +855,11 @@ const PrivateChatPage = () => {
         if (messageType === 'VIDEO' && mediaUrl) {
             return (
                 <div className="space-y-2">
-                    <video className="max-h-64 rounded-lg w-full" controls src={mediaUrl} />
+                    <video
+                        className="max-h-64 max-w-full rounded-lg w-full"
+                        controls
+                        src={mediaUrl}
+                    />
                     {shouldShowCaption && <p className="break-words">{msg.content}</p>}
                 </div>
             );
@@ -819,7 +868,7 @@ const PrivateChatPage = () => {
         if (messageType === 'AUDIO' && mediaUrl) {
             return (
                 <div className="space-y-2">
-                    <audio controls src={mediaUrl} className="w-full" />
+                    <audio controls src={mediaUrl} className="w-full max-w-full" />
                     {shouldShowCaption && <p className="break-words">{msg.content}</p>}
                 </div>
             );
@@ -847,7 +896,7 @@ const PrivateChatPage = () => {
     /* ================= RENDER LOADING ================= */
     if (loading) {
         return (
-            <div className="flex flex-col items-center justify-center h-full bg-[#0b141a]">
+            <div className="flex flex-col items-center justify-center h-full w-full bg-[#0b141a]">
                 <Loader className="h-10 w-10 animate-spin text-[#25d366] mb-4" />
                 <p className="text-[#d1d7db]">Loading chat...</p>
             </div>
@@ -877,7 +926,10 @@ const PrivateChatPage = () => {
     /* ================= UI ================= */
     return (
         <div className="private-chat flex flex-col h-full w-full bg-[#efeae2]">
-            <header className="px-4 py-3 bg-[#f0f2f5] border-b border-black/10 flex items-center gap-3">
+
+            {/* HEADER SAME */}
+
+            <header className="px-4 py-3 bg-[#f0f2f5] border-b border-black/10 flex items-center gap-3 w-full">
                 <button
                     onClick={handleBack}
                     className="h-9 w-9 rounded-full hover:bg-black/5 flex items-center justify-center text-[#54656f] lg:hidden"
@@ -910,15 +962,19 @@ const PrivateChatPage = () => {
             </header>
 
             {!isWsConnected && (
-                <div className="bg-[#fff3cd] border-b border-[#ffe69c] px-4 py-1.5 text-xs text-[#664d03] flex items-center gap-2">
+                <div className="bg-[#fff3cd] border-b border-[#ffe69c] px-4 py-1.5 text-xs text-[#664d03] flex items-center gap-2 w-full">
                     <WifiOff className="h-3.5 w-3.5" />
                     <span>Connecting to chat server...</span>
                 </div>
             )}
 
-            <div className="relative flex-1 overflow-hidden">
+            {/* ================= CHAT BODY ================= */}
+
+            <div className="relative flex-1 overflow-hidden w-full">
+
+                {/* Background */}
                 <div
-                    className="absolute inset-0 opacity-40"
+                    className="absolute inset-0 opacity-40 w-full"
                     style={{
                         backgroundColor: '#efeae2',
                         backgroundImage:
@@ -928,31 +984,47 @@ const PrivateChatPage = () => {
                     }}
                 />
 
-                <div className="relative h-full overflow-y-auto px-3 md:px-6 py-4 space-y-2">
+                {/* ================= MESSAGE CONTAINER ================= */}
+
+                <div
+                    ref={chatContainerRef}
+                    onScroll={handleScroll}
+                    className="relative h-full overflow-y-auto overflow-x-hidden px-3 md:px-6 py-4 space-y-2 w-full max-w-full"
+                >
+
+                    {/* PAGINATION LOADER */}
+
+                    {loadingMore && (
+                        <div className="flex justify-center py-2">
+                            <Loader className="h-4 w-4 animate-spin text-[#667781]" />
+                        </div>
+                    )}
+
                     {messages.length === 0 ? (
-                        <div className="h-full flex flex-col items-center justify-center text-[#667781] text-center px-6">
+                        <div className="h-full flex flex-col items-center justify-center text-[#667781] text-center px-6 w-full">
                             <User className="h-12 w-12 mb-3 text-[#8696a0]" />
                             <p>No messages yet</p>
                             <p className="text-xs mt-1">Send a message to start this conversation.</p>
                         </div>
                     ) : (
+
                         messages.map((msg) => {
+
                             const isMine = Number(msg.senderId) === currentUserId;
                             const messageTime = new Date(msg.sentAt);
 
                             return (
                                 <div
                                     key={msg.messageId || `${msg.sentAt}-${msg.senderId}`}
-                                    className={`flex ${isMine ? 'justify-end' : 'justify-start'}`}
+                                    className={`flex w-full ${isMine ? 'justify-end' : 'justify-start'}`}
                                 >
-                                    <div className={`max-w-[82%] md:max-w-[65%] message-bubble px-3 py-2 rounded-lg shadow-sm text-sm ${
-                                        isMine
-                                            ? 'mine bg-[#d9fdd3] text-[#111b21] rounded-tr-sm'
-                                            : 'their bg-white text-[#111b21] rounded-tl-sm'
-                                    }`}>
+
+                                    <div className={`max-w-[82%] md:max-w-[65%] w-full message-bubble px-3 py-2 rounded-lg shadow-sm text-sm overflow-hidden ${isMine ? 'mine bg-[#d9fdd3]' : 'their bg-white'}`}>
+                                        
                                         {renderMessageBody(msg)}
 
                                         <div className="mt-1 flex items-center justify-end gap-1 text-[11px] text-[#667781]">
+
                                             <span className="msg-time">
                                                 {messageTime.toLocaleTimeString([], {
                                                     hour: '2-digit',
@@ -969,18 +1041,26 @@ const PrivateChatPage = () => {
                                                     <Check className="h-3.5 w-3.5 text-[#8696a0]" />
                                                 )
                                             )}
+
                                         </div>
+
                                     </div>
+
                                 </div>
                             );
+
                         })
+
                     )}
+
                     <div ref={bottomRef} />
+
                 </div>
+
             </div>
 
             {isTyping && typingUserId && Number(typingUserId) !== currentUserId && (
-                <div className="px-4 py-2 bg-[#f0f2f5] border-t border-black/10">
+                <div className="px-4 py-2 bg-[#f0f2f5] border-t border-black/10 w-full">
                     <div className="inline-flex items-center gap-1 rounded-full bg-white px-3 py-1 text-xs text-[#667781]">
                         <span className="h-1.5 w-1.5 rounded-full bg-[#667781] animate-bounce" />
                         <span className="h-1.5 w-1.5 rounded-full bg-[#667781] animate-bounce" style={{ animationDelay: '0.1s' }} />
@@ -990,7 +1070,7 @@ const PrivateChatPage = () => {
                 </div>
             )}
 
-            <div className="bg-[#f0f2f5] border-t border-black/10 px-3 py-3">
+            <div className="bg-[#f0f2f5] border-t border-black/10 px-3 py-3 w-full">
                 <input
                     ref={fileInputRef}
                     type="file"
@@ -1000,7 +1080,7 @@ const PrivateChatPage = () => {
                 />
 
                 {pendingMedia && (
-                    <div className="mb-3 p-2 border border-black/10 rounded-lg bg-white">
+                    <div className="mb-3 p-2 border border-black/10 rounded-lg bg-white w-full">
                         <div className="flex items-center justify-between">
                             <p className="text-xs text-[#667781] truncate pr-2">
                                 {pendingMedia.fileName}
@@ -1017,7 +1097,7 @@ const PrivateChatPage = () => {
                             <img
                                 src={buildDataUrl(pendingMedia.base64, pendingMedia.mimeType)}
                                 alt={pendingMedia.fileName || 'Selected image'}
-                                className="mt-2 max-h-40 rounded"
+                                className="mt-2 max-h-40 rounded w-full"
                             />
                         )}
                         {pendingMedia.messageType === 'VIDEO' && (
@@ -1037,14 +1117,13 @@ const PrivateChatPage = () => {
                     </div>
                 )}
 
-                <div className="flex items-end gap-2">
+                <div className="flex items-end gap-2 w-full">
                     <button
                         type="button"
                         onClick={() => fileInputRef.current?.click()}
                         disabled={!isWsConnected}
-                        className={`p-2 rounded-full ${
-                            isWsConnected ? 'hover:bg-black/5 text-[#54656f]' : 'text-[#a8b2b8] cursor-not-allowed'
-                        }`}
+                        className={`p-2 rounded-full ${isWsConnected ? 'hover:bg-black/5 text-[#54656f]' : 'text-[#a8b2b8] cursor-not-allowed'
+                            }`}
                         title="Attach image/file"
                     >
                         <Paperclip className="h-5 w-5" />
@@ -1054,13 +1133,12 @@ const PrivateChatPage = () => {
                         type="button"
                         onClick={isRecordingAudio ? stopRecording : startAudioRecording}
                         disabled={!isWsConnected || isRecordingVideo}
-                        className={`p-2 rounded-full ${
-                            isRecordingAudio
+                        className={`p-2 rounded-full ${isRecordingAudio
                                 ? 'bg-red-100 text-red-600'
                                 : isWsConnected && !isRecordingVideo
                                     ? 'hover:bg-black/5 text-[#54656f]'
                                     : 'text-[#a8b2b8] cursor-not-allowed'
-                        }`}
+                            }`}
                         title={isRecordingAudio ? 'Stop audio recording' : 'Record audio'}
                     >
                         {isRecordingAudio ? <Square className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
@@ -1070,13 +1148,12 @@ const PrivateChatPage = () => {
                         type="button"
                         onClick={isRecordingVideo ? stopRecording : startVideoRecording}
                         disabled={!isWsConnected || isRecordingAudio}
-                        className={`p-2 rounded-full ${
-                            isRecordingVideo
+                        className={`p-2 rounded-full ${isRecordingVideo
                                 ? 'bg-red-100 text-red-600'
                                 : isWsConnected && !isRecordingAudio
                                     ? 'hover:bg-black/5 text-[#54656f]'
                                     : 'text-[#a8b2b8] cursor-not-allowed'
-                        }`}
+                            }`}
                         title={isRecordingVideo ? 'Stop video recording' : 'Record video'}
                     >
                         {isRecordingVideo ? <Square className="h-5 w-5" /> : <Video className="h-5 w-5" />}
@@ -1103,26 +1180,24 @@ const PrivateChatPage = () => {
                             }}
                             placeholder={isWsConnected ? 'Type a message' : 'Connecting...'}
                             disabled={!isWsConnected}
-                            className={`w-full bg-transparent py-1.5 outline-none text-sm text-[#111b21] placeholder:text-[#667781] ${
-                                !isWsConnected ? 'cursor-not-allowed text-[#a8b2b8]' : ''
-                            }`}
+                            className={`w-full bg-transparent py-1.5 outline-none text-sm text-[#111b21] placeholder:text-[#667781] ${!isWsConnected ? 'cursor-not-allowed text-[#a8b2b8]' : ''
+                                }`}
                         />
                     </div>
 
                     <button
                         onClick={sendMessage}
                         disabled={(!text.trim() && !pendingMedia) || !isWsConnected}
-                        className={`p-3 rounded-full flex items-center justify-center shrink-0 ${
-                            (text.trim() || pendingMedia) && isWsConnected
+                        className={`p-3 rounded-full flex items-center justify-center shrink-0 ${(text.trim() || pendingMedia) && isWsConnected
                                 ? 'bg-[#25d366] hover:bg-[#20bd5a] text-white'
                                 : 'bg-[#dfe5e7] text-[#a8b2b8] cursor-not-allowed'
-                        } transition-colors`}
+                            } transition-colors`}
                     >
                         <Send className="h-5 w-5" />
                     </button>
                 </div>
 
-                <div className="mt-2 text-center">
+                <div className="mt-2 text-center w-full">
                     <p className="text-[11px] text-[#667781]">
                         {isWsConnected ? <Wifi className="inline h-3 w-3 mr-1" /> : <WifiOff className="inline h-3 w-3 mr-1" />}
                         {connectionLabel}
@@ -1134,3 +1209,4 @@ const PrivateChatPage = () => {
 };
 
 export default PrivateChatPage;
+
