@@ -25,7 +25,7 @@ import { useParams, useLocation, useNavigate } from 'react-router-dom';
 
 const MEDIA_PLACEHOLDER_TEXTS = new Set(['[Image]', '[Video]', '[Audio]', '[File]']);
 const MAX_MEDIA_BASE64_LENGTH = 900000;
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 20; // messages per page
 
 const PrivateChatPage = () => {
     const { roomId } = useParams();
@@ -33,6 +33,9 @@ const PrivateChatPage = () => {
 
     const [messages, setMessages] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [loadingMore, setLoadingMore] = useState(false);
+    const [page, setPage] = useState(0);
+    const [hasMore, setHasMore] = useState(true);
     const [text, setText] = useState('');
     const [isTyping, setIsTyping] = useState(false);
     const [isWsConnected, setIsWsConnected] = useState(false);
@@ -53,10 +56,8 @@ const PrivateChatPage = () => {
     const mediaStreamRef = useRef(null);
     const mediaChunksRef = useRef(null);
 
-    const [page, setPage] = useState(0);
-    const [hasMore, setHasMore] = useState(true);
-    const [loadingMore, setLoadingMore] = useState(false);
     const chatContainerRef = useRef(null);
+    const bottomRef = useRef(null);
 
     const [presence, setPresence] = useState({
         online: false,
@@ -68,7 +69,6 @@ const PrivateChatPage = () => {
     const [otherUserId, setOtherUserId] = useState(location.state?.otherUserId ?? null);
 
     const wsRef = useRef(null);
-    const bottomRef = useRef(null);
     const otherUserIdRef = useRef(location.state?.otherUserId ?? null);
 
     const user = JSON.parse(localStorage.getItem('user') || 'null');
@@ -78,78 +78,6 @@ const PrivateChatPage = () => {
     const isChatActive = useCallback(() => {
         return document.visibilityState === 'visible';
     }, []);
-
-
-    /* ================= PAGINATED LOAD ================= */
-const loadMessages = useCallback(async (pageNumber = 0, scrollInfo = null) => {
-    try {
-        if (pageNumber === 0) setLoading(true);
-
-        const res = await api.get(`/chat/rooms/${roomId}/messages/paginated`, {
-            params: { page: pageNumber, size: PAGE_SIZE }
-        });
-
-        const pageData = res?.data;
-        if (!pageData) throw new Error("Invalid API response");
-
-        const mapped = pageData.content.map(m => ({
-            messageId: m.messageId,
-            roomId: m.roomId,
-            senderId: m.senderId,
-            content: m.content,
-            sentAt: new Date(m.createdAt).getTime(),
-            messageType: m.messageType || 'TEXT',
-            mediaBase64: m.mediaBase64 || null,
-            mimeType: m.mimeType || null,
-            fileName: m.fileName || null,
-            delivered: m.deliveryStatus === 'DELIVERED' || m.deliveryStatus === 'READ',
-            read: m.deliveryStatus === 'READ'
-        }));
-
-        if (pageNumber === 0) {
-            setMessages(mapped.reverse());
-        } else {
-            setMessages(prev => [...mapped.reverse(), ...prev]);
-        }
-
-        setPage(pageData.pageNumber);
-        setHasMore(pageData.hasNext);
-
-        // Scroll position maintain (जब ऊपर से नए messages load हों)
-        if (scrollInfo && chatContainerRef.current) {
-            const { oldScrollHeight, oldScrollTop } = scrollInfo;
-            setTimeout(() => {
-                const newScrollHeight = chatContainerRef.current.scrollHeight;
-                chatContainerRef.current.scrollTop = newScrollHeight - oldScrollHeight + oldScrollTop;
-            }, 0);
-        }
-
-    } catch (err) {
-        console.error("LOAD MESSAGE ERROR:", err);
-        toast.error('Failed to load messages');
-    } finally {
-        setLoading(false);
-    }
-}, [roomId]);
-    /* ================= SCROLL LOAD ================= */
-const handleScroll = () => {
-    const div = chatContainerRef.current;
-    if (!div) return;
-
-  
-    if (div.scrollTop < 50 && hasMore && !loadingMore) {
-        const nextPage = page + 1;
-        setLoadingMore(true);
-
-
-        const oldScrollHeight = div.scrollHeight;
-        const oldScrollTop = div.scrollTop;
-
-        loadMessages(nextPage, { oldScrollHeight, oldScrollTop }).finally(() => {
-            setLoadingMore(false);
-        });
-    }
-};
 
     const getMessageTypeFromMime = (mimeType = '') => {
         if (mimeType.startsWith('image/')) return 'IMAGE';
@@ -327,7 +255,90 @@ const handleScroll = () => {
         navigate(-1);
     };
 
+/* ================= SCROLL HANDLER ================= */
+const handleScroll = useCallback(() => {
+    const container = chatContainerRef.current;
+    if (!container) return;
 
+    // If scrolled near top and more messages exist, load previous page
+    if (container.scrollTop < 100 && hasMore && !loadingMore) {
+        console.log('Triggering load more, next page:', page + 1);
+        const nextPage = page + 1;
+        const oldScrollHeight = container.scrollHeight;
+        const oldScrollTop = container.scrollTop;
+        loadMessages(nextPage, { oldScrollHeight, oldScrollTop });
+    }
+}, [hasMore, loadingMore, page]);
+
+/* ================= PAGINATED LOAD MESSAGES ================= */
+const loadMessages = useCallback(async (pageNumber = 0, scrollInfo = null) => {
+    console.log('loadMessages called with page:', pageNumber, 'scrollInfo:', scrollInfo);
+    try {
+        if (pageNumber === 0) setLoading(true);
+        else setLoadingMore(true);
+
+        const res = await api.get(`/chat/rooms/${roomId}/messages/paginated`, {
+            params: { page: pageNumber, size: PAGE_SIZE, sort: 'DESC' } // newest first
+        });
+
+        const pageData = res?.data;
+        if (!pageData) throw new Error('Invalid API response');
+
+        const mapped = pageData.content.map(m => ({
+            messageId: m.messageId,
+            roomId: m.roomId,
+            senderId: m.senderId,
+            content: m.content,
+            sentAt: new Date(m.createdAt * 1000).getTime(),
+            messageType: m.messageType || 'TEXT',
+            mediaBase64: m.mediaBase64 || null,
+            mimeType: m.mimeType || null,
+            fileName: m.fileName || null,
+            delivered: m.deliveryStatus === 'DELIVERED' || m.deliveryStatus === 'READ',
+            read: m.deliveryStatus === 'READ'
+        }));
+
+        if (pageNumber === 0) {
+            // First page: reverse to show oldest at top, newest at bottom
+            setMessages(mapped.reverse());
+            // Scroll to bottom after first page loads
+            setTimeout(() => {
+                if (chatContainerRef.current) {
+                    chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+                }
+            }, 100);
+        } else {
+            // Older pages: prepend reversed (oldest first)
+            setMessages(prev => [...mapped.reverse(), ...prev]);
+        }
+
+        setPage(pageData.pageNumber);
+        setHasMore(pageData.hasNext);
+
+        // Infer other user if not known
+        const inferredOtherUserId = mapped.find(m => Number(m.senderId) !== currentUserId)?.senderId;
+        if (inferredOtherUserId && inferredOtherUserId !== otherUserIdRef.current) {
+            otherUserIdRef.current = inferredOtherUserId;
+            setOtherUserId(inferredOtherUserId);
+        }
+
+        // Restore scroll position after prepending older messages
+        if (scrollInfo && chatContainerRef.current) {
+            const { oldScrollHeight, oldScrollTop } = scrollInfo;
+            setTimeout(() => {
+                const newScrollHeight = chatContainerRef.current.scrollHeight;
+                chatContainerRef.current.scrollTop = newScrollHeight - oldScrollHeight + oldScrollTop;
+            }, 0);
+        }
+
+    } catch (err) {
+        console.error('LOAD MESSAGES ERROR:', err);
+        toast.error('Failed to load messages');
+    } finally {
+        setLoading(false);
+        setLoadingMore(false);
+    }
+}, [currentUserId, roomId]);
     /* ================= TYPING HANDLER ================= */
     const handleTyping = useCallback(() => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
@@ -362,14 +373,12 @@ const handleScroll = () => {
             return;
         }
 
-        // Close existing connection if any
         if (wsRef.current) {
             manualCloseRef.current = true;
             wsRef.current.close();
             wsRef.current = null;
         }
 
-        // Clear any retry timeout
         if (connectionRetryRef.current) {
             clearTimeout(connectionRetryRef.current);
             connectionRetryRef.current = null;
@@ -382,9 +391,7 @@ const handleScroll = () => {
         const ws = new WebSocket(buildChatWsUrl(authToken));
 
         const pingInterval = setInterval(() => {
-            if (connectSeq !== wsConnectSeqRef.current) {
-                return;
-            }
+            if (connectSeq !== wsConnectSeqRef.current) return;
             if (ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'PING' }));
                 ws.send(JSON.stringify({
@@ -396,14 +403,11 @@ const handleScroll = () => {
         }, 25000);
 
         ws.onopen = () => {
-            if (connectSeq !== wsConnectSeqRef.current) {
-                return;
-            }
+            if (connectSeq !== wsConnectSeqRef.current) return;
             console.log('[WS] Connected successfully');
             setIsWsConnected(true);
             setConnectionStatus('connected');
 
-            // Send initial room-open presence immediately after open
             ws.send(JSON.stringify({
                 type: 'ROOM_OPEN',
                 roomId: Number(roomId),
@@ -411,27 +415,24 @@ const handleScroll = () => {
             }));
 
             if (isChatActive()) {
-                api.post(`/chat/rooms/${roomId}/read`).catch(() => { });
+                api.post(`/chat/rooms/${roomId}/read`).catch(() => {});
             }
         };
 
         ws.onmessage = (event) => {
-            if (connectSeq !== wsConnectSeqRef.current) {
-                return;
-            }
+            if (connectSeq !== wsConnectSeqRef.current) return;
             try {
                 const data = JSON.parse(event.data);
                 console.log('[WS EVENT] Received:', data);
                 window.dispatchEvent(new CustomEvent('chat-ws-event', { detail: data }));
 
-                // READ EVENT (blue ticks for sender)
+                // READ EVENT
                 if (data.type === 'READ' && data.roomId === Number(roomId)) {
                     const readerId = Number(data.readerId);
                     const senderId = Number(data.senderId);
 
-                    // Defensive guard: ignore self-read or malformed sender events.
-                    if ((Number.isFinite(readerId) && readerId === currentUserId)
-                        || (Number.isFinite(senderId) && senderId !== currentUserId)) {
+                    if ((Number.isFinite(readerId) && readerId === currentUserId) ||
+                        (Number.isFinite(senderId) && senderId !== currentUserId)) {
                         return;
                     }
 
@@ -445,6 +446,7 @@ const handleScroll = () => {
                     return;
                 }
 
+                // DELIVERED EVENT
                 if (data.type === 'DELIVERED' && data.roomId === Number(roomId)) {
                     setMessages(prev =>
                         prev.map(m =>
@@ -456,92 +458,57 @@ const handleScroll = () => {
                     return;
                 }
 
-                // USER ONLINE - FIXED: Always update presence for the other user in this chat
+                // USER ONLINE
                 if (data.type === 'USER_ONLINE') {
                     const incomingUserId = Number(data.userId);
                     const trackedOtherUserId = Number(otherUserIdRef.current);
 
-                    console.log('[PRESENCE] USER_ONLINE - incoming:', incomingUserId, 'tracked:', trackedOtherUserId);
+                    if (incomingUserId === currentUserId) return;
 
-                    // Skip if it's the current user
-                    if (incomingUserId === currentUserId) {
-                        console.log('[PRESENCE] Skipping - self event');
-                        return;
-                    }
-
-                    // Update otherUserId if not set
                     if (otherUserIdRef.current == null) {
                         otherUserIdRef.current = incomingUserId;
                         setOtherUserId(incomingUserId);
-                        console.log('[PRESENCE] Set otherUserId to:', incomingUserId);
                     }
 
-                    // Check if this event is for the other user in this chat
-                    const isForOtherUser = (trackedOtherUserId > 0 && incomingUserId === trackedOtherUserId)
-                        || (data.roomId && Number(data.roomId) === currentRoomId);
+                    const isForOtherUser = (trackedOtherUserId > 0 && incomingUserId === trackedOtherUserId) ||
+                        (data.roomId && Number(data.roomId) === currentRoomId);
 
                     if (isForOtherUser) {
-                        console.log('[PRESENCE] Setting online = true');
-                        setPresence({
-                            online: true,
-                            lastSeen: null
-                        });
+                        setPresence({ online: true, lastSeen: null });
                     }
                     return;
                 }
 
-                // USER OFFLINE - FIXED: Always update presence for the other user in this chat
+                // USER OFFLINE
                 if (data.type === 'USER_OFFLINE') {
                     const incomingUserId = Number(data.userId);
                     const trackedOtherUserId = Number(otherUserIdRef.current);
                     const lastSeen = (data.lastSeen && data.lastSeen > 0) ? data.lastSeen : null;
 
-                    console.log('[PRESENCE] USER_OFFLINE - incoming:', incomingUserId, 'tracked:', trackedOtherUserId, 'raw lastSeen:', data.lastSeen, 'processed:', lastSeen);
+                    if (incomingUserId === currentUserId) return;
 
-                    // Skip if it's the current user
-                    if (incomingUserId === currentUserId) {
-                        console.log('[PRESENCE] Skipping - self event');
-                        return;
-                    }
-
-                    // Update otherUserId if not set
                     if (otherUserIdRef.current == null) {
                         otherUserIdRef.current = incomingUserId;
                         setOtherUserId(incomingUserId);
-                        console.log('[PRESENCE] Set otherUserId to:', incomingUserId);
                     }
 
-                    // Check if this event is for the other user in this chat
-                    const isForOtherUser = (trackedOtherUserId > 0 && incomingUserId === trackedOtherUserId)
-                        || (data.roomId && Number(data.roomId) === currentRoomId);
+                    const isForOtherUser = (trackedOtherUserId > 0 && incomingUserId === trackedOtherUserId) ||
+                        (data.roomId && Number(data.roomId) === currentRoomId);
 
                     if (isForOtherUser) {
-                        console.log('[PRESENCE] Setting online = false, lastSeen:', lastSeen);
-                        setPresence({
-                            online: false,
-                            lastSeen: lastSeen && lastSeen > 0 ? lastSeen : null
-                        });
+                        setPresence({ online: false, lastSeen });
                     }
                     return;
                 }
 
                 // TYPING EVENT
                 if (data.type === 'TYPING' && data.roomId === Number(roomId)) {
-                    console.log('[TYPING] Received typing event from user:', data.userId);
-
-                    // Only show typing for other users
                     if (Number(data.userId) !== currentUserId) {
                         setTypingUserId(data.userId);
                         setIsTyping(true);
 
-                        // Clear existing timeout
-                        if (typingTimeoutRef.current) {
-                            clearTimeout(typingTimeoutRef.current);
-                        }
-
-                        // Set timeout to clear typing indicator
+                        if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
                         typingTimeoutRef.current = setTimeout(() => {
-                            console.log('[TYPING] Clearing indicator');
                             setIsTyping(false);
                             setTypingUserId(null);
                         }, 3000);
@@ -561,15 +528,9 @@ const handleScroll = () => {
 
                     const deliveryStatus = data.deliveryStatus || data.status;
                     const isOwnMessage = Number(data.senderId) === currentUserId;
-                    // Sender-side blue tick should come only from explicit READ event.
-                    const isRead = isOwnMessage
-                        ? false
-                        : (typeof data.read === 'boolean'
-                            ? data.read
-                            : deliveryStatus === 'READ');
-                    const isDelivered = typeof data.delivered === 'boolean'
-                        ? data.delivered
-                        : deliveryStatus === 'DELIVERED' || deliveryStatus === 'READ';
+                    const isRead = isOwnMessage ? false : (typeof data.read === 'boolean' ? data.read : deliveryStatus === 'READ');
+                    const isDelivered = typeof data.delivered === 'boolean' ? data.delivered : (deliveryStatus === 'DELIVERED' || deliveryStatus === 'READ');
+
                     const newMessage = {
                         messageId: data.messageId,
                         roomId: data.roomId,
@@ -585,19 +546,10 @@ const handleScroll = () => {
                         read: isRead
                     };
 
-                    console.log('[WS] New message received:', newMessage);
-
                     setMessages(prev => [...prev, newMessage]);
 
-                    // Mark as read if current user is receiver
                     if (Number(data.receiverId) === currentUserId && isChatActive()) {
-                        api.post(`/chat/rooms/${roomId}/read`)
-                            .then(() => {
-                                console.log('[WS] Message marked as read');
-                            })
-                            .catch(err => {
-                                console.error('[WS] Failed to mark as read:', err);
-                            });
+                        api.post(`/chat/rooms/${roomId}/read`).catch(() => {});
                     }
                 }
 
@@ -607,9 +559,7 @@ const handleScroll = () => {
         };
 
         ws.onerror = (error) => {
-            if (connectSeq !== wsConnectSeqRef.current) {
-                return;
-            }
+            if (connectSeq !== wsConnectSeqRef.current) return;
             console.error('[WS] Connection error:', error);
             setConnectionStatus('error');
             setIsWsConnected(false);
@@ -621,18 +571,12 @@ const handleScroll = () => {
                 return;
             }
 
-            console.warn('[WS] Closed', {
-                code: event?.code,
-                reason: event?.reason,
-                wasClean: event?.wasClean
-            });
-
+            console.warn('[WS] Closed', { code: event?.code, reason: event?.reason, wasClean: event?.wasClean });
             clearInterval(pingInterval);
             setIsWsConnected(false);
             setConnectionStatus('disconnected');
             wsRef.current = null;
 
-            // Clear typing indicator when disconnected
             setIsTyping(false);
             setTypingUserId(null);
 
@@ -644,11 +588,8 @@ const handleScroll = () => {
                 connectionRetryRef.current = null;
             }
 
-            if (wasManualClose || !shouldReconnectRef.current) {
-                return;
-            }
+            if (wasManualClose || !shouldReconnectRef.current) return;
 
-            // Invalid auth/session close -> do not keep retrying forever
             if (event?.code === 1008 || event?.code === 1003 || event?.code === 1002) {
                 console.warn('[WS] Closed due to auth/protocol issue. Stopping reconnect.', event);
                 shouldReconnectRef.current = false;
@@ -671,12 +612,9 @@ const handleScroll = () => {
     const sendMessage = async () => {
         if (!text.trim() && !pendingMedia) return;
 
-        // Clear typing indicator when sending
         setIsTyping(false);
         setTypingUserId(null);
-        if (typingTimeoutRef.current) {
-            clearTimeout(typingTimeoutRef.current);
-        }
+        if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
 
         try {
             await api.post('/chat/private/send', {
@@ -701,21 +639,14 @@ const handleScroll = () => {
         const value = e.target.value;
         setText(value);
 
-        // Clear previous debounce timeout
-        if (typingDebounceRef.current) {
-            clearTimeout(typingDebounceRef.current);
-        }
+        if (typingDebounceRef.current) clearTimeout(typingDebounceRef.current);
 
-        // Send typing event after 300ms of inactivity
         if (value.trim().length > 0) {
             typingDebounceRef.current = setTimeout(() => {
-                if (isWsConnected) {
-                    handleTyping();
-                }
+                if (isWsConnected) handleTyping();
             }, 300);
         }
 
-        // Clear typing indicator when input is empty
         if (value.trim().length === 0) {
             setIsTyping(false);
         }
@@ -727,9 +658,7 @@ const handleScroll = () => {
     }, [otherUserId]);
 
     useEffect(() => {
-        if (otherUserIdRef.current != null) {
-            return;
-        }
+        if (otherUserIdRef.current != null) return;
 
         let isMounted = true;
 
@@ -741,9 +670,7 @@ const handleScroll = () => {
                 );
 
                 const resolvedOtherUserId = Number(currentRoom?.otherUserId);
-                if (!isMounted || !Number.isFinite(resolvedOtherUserId)) {
-                    return;
-                }
+                if (!isMounted || !Number.isFinite(resolvedOtherUserId)) return;
 
                 otherUserIdRef.current = resolvedOtherUserId;
                 setOtherUserId(resolvedOtherUserId);
@@ -756,42 +683,37 @@ const handleScroll = () => {
                     }));
                 }
             } catch (error) {
-                // ignore: fallback is snapshot/message inference
+                // ignore – fallback to message inference
             }
         };
 
         resolveOtherUser();
 
-        return () => {
-            isMounted = false;
-        };
+        return () => { isMounted = false; };
     }, [currentRoomId, currentUserId]);
 
     useEffect(() => {
         const handleVisible = () => {
             if (document.visibilityState === 'visible' && isWsConnected) {
-                api.post(`/chat/rooms/${roomId}/read`).catch(() => { });
+                api.post(`/chat/rooms/${roomId}/read`).catch(() => {});
             }
         };
 
         document.addEventListener('visibilitychange', handleVisible);
-        return () => {
-            document.removeEventListener('visibilitychange', handleVisible);
-        };
+        return () => document.removeEventListener('visibilitychange', handleVisible);
     }, [roomId, isWsConnected]);
 
     useEffect(() => {
         shouldReconnectRef.current = true;
         manualCloseRef.current = false;
 
-        loadMessages(0);
+        loadMessages(0); // load first page on mount
         connectWebSocket();
 
         return () => {
             shouldReconnectRef.current = false;
             wsConnectSeqRef.current += 1;
 
-            // Clean up WebSocket
             if (wsRef.current) {
                 if (wsRef.current.readyState === WebSocket.OPEN) {
                     wsRef.current.send(JSON.stringify({
@@ -805,17 +727,9 @@ const handleScroll = () => {
                 wsRef.current = null;
             }
 
-            // Clean up timeouts
-            if (typingTimeoutRef.current) {
-                clearTimeout(typingTimeoutRef.current);
-            }
-            if (typingDebounceRef.current) {
-                clearTimeout(typingDebounceRef.current);
-            }
-            if (connectionRetryRef.current) {
-                clearTimeout(connectionRetryRef.current);
-                connectionRetryRef.current = null;
-            }
+            if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+            if (typingDebounceRef.current) clearTimeout(typingDebounceRef.current);
+            if (connectionRetryRef.current) clearTimeout(connectionRetryRef.current);
             if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
                 mediaRecorderRef.current.stop();
             }
@@ -829,8 +743,15 @@ const handleScroll = () => {
         };
     }, [currentRoomId, currentUserId, loadMessages, connectWebSocket, roomId, stopMediaStream]);
 
+    // Auto-scroll to bottom when new messages arrive (only if user was near bottom)
     useEffect(() => {
-        bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+        const container = chatContainerRef.current;
+        if (!container || messages.length === 0) return;
+
+        const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+        if (isNearBottom) {
+            bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }
     }, [messages]);
 
     const renderMessageBody = (msg) => {
@@ -880,7 +801,7 @@ const handleScroll = () => {
                     <a
                         href={mediaUrl}
                         download={msg.fileName || 'file'}
-                        className="underline font-medium"
+                        className="underline font-medium break-words"
                     >
                         {msg.fileName || 'Download file'}
                     </a>
@@ -892,27 +813,56 @@ const handleScroll = () => {
         return <p className="break-words leading-relaxed">{msg.content}</p>;
     };
 
-
     /* ================= RENDER LOADING ================= */
     if (loading) {
         return (
-            <div className="flex flex-col items-center justify-center h-full w-full bg-[#0b141a]">
+            <div className="flex flex-col items-center justify-center h-full bg-[#0b141a]">
                 <Loader className="h-10 w-10 animate-spin text-[#25d366] mb-4" />
                 <p className="text-[#d1d7db]">Loading chat...</p>
             </div>
         );
     }
 
-    const presenceLabel = isTyping && typingUserId && Number(typingUserId) !== currentUserId
-        ? 'typing...'
-        : (presence.online
-            ? 'online'
-            : presence.lastSeen
-                ? `last seen ${new Date(presence.lastSeen).toLocaleTimeString([], {
-                    hour: '2-digit',
-                    minute: '2-digit'
-                })}`
-                : 'offline');
+    const formatLastSeen = (timestamp) => {
+        if (!timestamp) return '';
+
+        const lastSeen = new Date(timestamp);
+        const now = new Date();
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const yesterday = new Date();
+        yesterday.setDate(now.getDate() - 1);
+        yesterday.setHours(0, 0, 0, 0);
+
+        const time = lastSeen.toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+
+        if (lastSeen >= today) {
+            return `today at ${time}`;
+        }
+
+        if (lastSeen >= yesterday && lastSeen < today) {
+            return `yesterday at ${time}`;
+        }
+
+        return lastSeen.toLocaleDateString([], {
+            day: '2-digit',
+            month: 'short'
+        }) + ` at ${time}`;
+    };
+
+    const presenceLabel =
+        isTyping && typingUserId && Number(typingUserId) !== currentUserId
+            ? 'typing...'
+            : presence.online
+                ? 'online'
+                : presence.lastSeen
+                    ? `last seen ${formatLastSeen(presence.lastSeen)}`
+                    : 'offline';
 
     const connectionLabel =
         connectionStatus === 'connecting'
@@ -925,11 +875,8 @@ const handleScroll = () => {
 
     /* ================= UI ================= */
     return (
-        <div className="private-chat flex flex-col h-full w-full bg-[#efeae2]">
-
-            {/* HEADER SAME */}
-
-            <header className="px-4 py-3 bg-[#f0f2f5] border-b border-black/10 flex items-center gap-3 w-full">
+        <div className="private-chat flex flex-col h-screen w-full bg-[#efeae2]">
+            <header className="px-4 py-3 bg-[#f0f2f5] border-b border-black/10 flex items-center gap-3 shrink-0">
                 <button
                     onClick={handleBack}
                     className="h-9 w-9 rounded-full hover:bg-black/5 flex items-center justify-center text-[#54656f] lg:hidden"
@@ -962,38 +909,23 @@ const handleScroll = () => {
             </header>
 
             {!isWsConnected && (
-                <div className="bg-[#fff3cd] border-b border-[#ffe69c] px-4 py-1.5 text-xs text-[#664d03] flex items-center gap-2 w-full">
+                <div className="bg-[#fff3cd] border-b border-[#ffe69c] px-4 py-1.5 text-xs text-[#664d03] flex items-center gap-2 shrink-0">
                     <WifiOff className="h-3.5 w-3.5" />
                     <span>Connecting to chat server...</span>
                 </div>
             )}
 
-            {/* ================= CHAT BODY ================= */}
-
-            <div className="relative flex-1 overflow-hidden w-full">
-
-                {/* Background */}
-                <div
-                    className="absolute inset-0 opacity-40 w-full"
-                    style={{
-                        backgroundColor: '#efeae2',
-                        backgroundImage:
-                            'radial-gradient(rgba(84,101,111,0.08) 1px, transparent 1px), radial-gradient(rgba(84,101,111,0.06) 1px, transparent 1px)',
-                        backgroundPosition: '0 0, 16px 16px',
-                        backgroundSize: '32px 32px'
-                    }}
-                />
-
-                {/* ================= MESSAGE CONTAINER ================= */}
-
+            <div className="relative flex-1 overflow-hidden bg-[#efeae2]" style={{
+                backgroundImage:
+                    'radial-gradient(rgba(84,101,111,0.08) 1px, transparent 1px), radial-gradient(rgba(84,101,111,0.06) 1px, transparent 1px)',
+                backgroundPosition: '0 0, 16px 16px',
+                backgroundSize: '32px 32px'
+            }}>
                 <div
                     ref={chatContainerRef}
                     onScroll={handleScroll}
-                    className="relative h-full overflow-y-auto overflow-x-hidden px-3 md:px-6 py-4 space-y-2 w-full max-w-full"
+                    className="absolute inset-0 overflow-y-auto overflow-x-hidden px-3 md:px-6 py-4 space-y-2"
                 >
-
-                    {/* PAGINATION LOADER */}
-
                     {loadingMore && (
                         <div className="flex justify-center py-2">
                             <Loader className="h-4 w-4 animate-spin text-[#667781]" />
@@ -1001,30 +933,29 @@ const handleScroll = () => {
                     )}
 
                     {messages.length === 0 ? (
-                        <div className="h-full flex flex-col items-center justify-center text-[#667781] text-center px-6 w-full">
+                        <div className="h-full flex flex-col items-center justify-center text-[#667781] text-center px-6">
                             <User className="h-12 w-12 mb-3 text-[#8696a0]" />
                             <p>No messages yet</p>
                             <p className="text-xs mt-1">Send a message to start this conversation.</p>
                         </div>
                     ) : (
-
                         messages.map((msg) => {
-
                             const isMine = Number(msg.senderId) === currentUserId;
                             const messageTime = new Date(msg.sentAt);
 
                             return (
                                 <div
                                     key={msg.messageId || `${msg.sentAt}-${msg.senderId}`}
-                                    className={`flex w-full ${isMine ? 'justify-end' : 'justify-start'}`}
+                                    className={`flex ${isMine ? 'justify-end' : 'justify-start'}`}
                                 >
-
-                                    <div className={`max-w-[82%] md:max-w-[65%] w-full message-bubble px-3 py-2 rounded-lg shadow-sm text-sm overflow-hidden ${isMine ? 'mine bg-[#d9fdd3]' : 'their bg-white'}`}>
-                                        
+                                    <div className={`max-w-[82%] md:max-w-[65%] message-bubble px-3 py-2 rounded-lg shadow-sm text-sm overflow-hidden ${
+                                        isMine
+                                            ? 'mine bg-[#d9fdd3] text-[#111b21] rounded-tr-sm'
+                                            : 'their bg-white text-[#111b21] rounded-tl-sm'
+                                    }`}>
                                         {renderMessageBody(msg)}
 
                                         <div className="mt-1 flex items-center justify-end gap-1 text-[11px] text-[#667781]">
-
                                             <span className="msg-time">
                                                 {messageTime.toLocaleTimeString([], {
                                                     hour: '2-digit',
@@ -1041,26 +972,18 @@ const handleScroll = () => {
                                                     <Check className="h-3.5 w-3.5 text-[#8696a0]" />
                                                 )
                                             )}
-
                                         </div>
-
                                     </div>
-
                                 </div>
                             );
-
                         })
-
                     )}
-
                     <div ref={bottomRef} />
-
                 </div>
-
             </div>
 
             {isTyping && typingUserId && Number(typingUserId) !== currentUserId && (
-                <div className="px-4 py-2 bg-[#f0f2f5] border-t border-black/10 w-full">
+                <div className="px-4 py-2 bg-[#f0f2f5] border-t border-black/10 shrink-0">
                     <div className="inline-flex items-center gap-1 rounded-full bg-white px-3 py-1 text-xs text-[#667781]">
                         <span className="h-1.5 w-1.5 rounded-full bg-[#667781] animate-bounce" />
                         <span className="h-1.5 w-1.5 rounded-full bg-[#667781] animate-bounce" style={{ animationDelay: '0.1s' }} />
@@ -1070,7 +993,7 @@ const handleScroll = () => {
                 </div>
             )}
 
-            <div className="bg-[#f0f2f5] border-t border-black/10 px-3 py-3 w-full">
+            <div className="bg-[#f0f2f5] border-t border-black/10 px-3 py-3 shrink-0">
                 <input
                     ref={fileInputRef}
                     type="file"
@@ -1080,7 +1003,7 @@ const handleScroll = () => {
                 />
 
                 {pendingMedia && (
-                    <div className="mb-3 p-2 border border-black/10 rounded-lg bg-white w-full">
+                    <div className="mb-3 p-2 border border-black/10 rounded-lg bg-white">
                         <div className="flex items-center justify-between">
                             <p className="text-xs text-[#667781] truncate pr-2">
                                 {pendingMedia.fileName}
@@ -1097,19 +1020,19 @@ const handleScroll = () => {
                             <img
                                 src={buildDataUrl(pendingMedia.base64, pendingMedia.mimeType)}
                                 alt={pendingMedia.fileName || 'Selected image'}
-                                className="mt-2 max-h-40 rounded w-full"
+                                className="mt-2 max-h-40 rounded max-w-full"
                             />
                         )}
                         {pendingMedia.messageType === 'VIDEO' && (
                             <video
-                                className="mt-2 max-h-40 rounded w-full"
+                                className="mt-2 max-h-40 rounded w-full max-w-full"
                                 controls
                                 src={buildDataUrl(pendingMedia.base64, pendingMedia.mimeType)}
                             />
                         )}
                         {pendingMedia.messageType === 'AUDIO' && (
                             <audio
-                                className="mt-2 w-full"
+                                className="mt-2 w-full max-w-full"
                                 controls
                                 src={buildDataUrl(pendingMedia.base64, pendingMedia.mimeType)}
                             />
@@ -1117,13 +1040,14 @@ const handleScroll = () => {
                     </div>
                 )}
 
-                <div className="flex items-end gap-2 w-full">
+                <div className="flex items-end gap-2">
                     <button
                         type="button"
                         onClick={() => fileInputRef.current?.click()}
                         disabled={!isWsConnected}
-                        className={`p-2 rounded-full ${isWsConnected ? 'hover:bg-black/5 text-[#54656f]' : 'text-[#a8b2b8] cursor-not-allowed'
-                            }`}
+                        className={`p-2 rounded-full ${
+                            isWsConnected ? 'hover:bg-black/5 text-[#54656f]' : 'text-[#a8b2b8] cursor-not-allowed'
+                        }`}
                         title="Attach image/file"
                     >
                         <Paperclip className="h-5 w-5" />
@@ -1133,12 +1057,13 @@ const handleScroll = () => {
                         type="button"
                         onClick={isRecordingAudio ? stopRecording : startAudioRecording}
                         disabled={!isWsConnected || isRecordingVideo}
-                        className={`p-2 rounded-full ${isRecordingAudio
+                        className={`p-2 rounded-full ${
+                            isRecordingAudio
                                 ? 'bg-red-100 text-red-600'
                                 : isWsConnected && !isRecordingVideo
                                     ? 'hover:bg-black/5 text-[#54656f]'
                                     : 'text-[#a8b2b8] cursor-not-allowed'
-                            }`}
+                        }`}
                         title={isRecordingAudio ? 'Stop audio recording' : 'Record audio'}
                     >
                         {isRecordingAudio ? <Square className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
@@ -1148,12 +1073,13 @@ const handleScroll = () => {
                         type="button"
                         onClick={isRecordingVideo ? stopRecording : startVideoRecording}
                         disabled={!isWsConnected || isRecordingAudio}
-                        className={`p-2 rounded-full ${isRecordingVideo
+                        className={`p-2 rounded-full ${
+                            isRecordingVideo
                                 ? 'bg-red-100 text-red-600'
                                 : isWsConnected && !isRecordingAudio
                                     ? 'hover:bg-black/5 text-[#54656f]'
                                     : 'text-[#a8b2b8] cursor-not-allowed'
-                            }`}
+                        }`}
                         title={isRecordingVideo ? 'Stop video recording' : 'Record video'}
                     >
                         {isRecordingVideo ? <Square className="h-5 w-5" /> : <Video className="h-5 w-5" />}
@@ -1180,24 +1106,26 @@ const handleScroll = () => {
                             }}
                             placeholder={isWsConnected ? 'Type a message' : 'Connecting...'}
                             disabled={!isWsConnected}
-                            className={`w-full bg-transparent py-1.5 outline-none text-sm text-[#111b21] placeholder:text-[#667781] ${!isWsConnected ? 'cursor-not-allowed text-[#a8b2b8]' : ''
-                                }`}
+                            className={`w-full bg-transparent py-1.5 outline-none text-sm text-[#111b21] placeholder:text-[#667781] ${
+                                !isWsConnected ? 'cursor-not-allowed text-[#a8b2b8]' : ''
+                            }`}
                         />
                     </div>
 
                     <button
                         onClick={sendMessage}
                         disabled={(!text.trim() && !pendingMedia) || !isWsConnected}
-                        className={`p-3 rounded-full flex items-center justify-center shrink-0 ${(text.trim() || pendingMedia) && isWsConnected
+                        className={`p-3 rounded-full flex items-center justify-center shrink-0 ${
+                            (text.trim() || pendingMedia) && isWsConnected
                                 ? 'bg-[#25d366] hover:bg-[#20bd5a] text-white'
                                 : 'bg-[#dfe5e7] text-[#a8b2b8] cursor-not-allowed'
-                            } transition-colors`}
+                        } transition-colors`}
                     >
                         <Send className="h-5 w-5" />
                     </button>
                 </div>
 
-                <div className="mt-2 text-center w-full">
+                <div className="mt-2 text-center">
                     <p className="text-[11px] text-[#667781]">
                         {isWsConnected ? <Wifi className="inline h-3 w-3 mr-1" /> : <WifiOff className="inline h-3 w-3 mr-1" />}
                         {connectionLabel}
@@ -1209,4 +1137,3 @@ const handleScroll = () => {
 };
 
 export default PrivateChatPage;
-
